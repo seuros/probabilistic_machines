@@ -144,6 +144,7 @@ fn saturation_is_reported_rather_than_silent() {
     assert_eq!(sketch.estimate(b"x"), u32::MAX);
 }
 
+#[cfg(feature = "alloc")]
 #[test]
 fn saturation_survives_a_round_trip() {
     let mut sketch = CountMinSketch::<32, 3>::new();

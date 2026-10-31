@@ -25,6 +25,7 @@ fn estimates_land_inside_three_standard_errors() {
     }
 }
 
+#[cfg(feature = "std")]
 #[test]
 fn small_cardinalities_fall_back_to_linear_counting() {
     for &truth in &[1_u32, 7, 50, 100] {
