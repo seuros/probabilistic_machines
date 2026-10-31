@@ -12,6 +12,7 @@ fn relative_error(estimate: f64, truth: f64) -> f64 {
     (estimate - truth).abs() / truth
 }
 
+#[cfg(feature = "std")]
 #[test]
 fn estimates_land_inside_three_standard_errors() {
     let tolerance = 3.0 * HyperLogLog::<4096>::standard_error();
@@ -35,6 +36,7 @@ fn small_cardinalities_fall_back_to_linear_counting() {
     }
 }
 
+#[cfg(feature = "std")]
 #[test]
 fn the_switch_between_estimators_leaves_no_discontinuity() {
     let tolerance = 3.0 * HyperLogLog::<1024>::standard_error();
@@ -124,6 +126,8 @@ fn frames_round_trip_and_reject_foreign_bytes() {
 
     let mut frame = [0_u8; HyperLogLog::<64>::ENCODED_LEN];
     assert_eq!(sketch.encode(&mut frame), Ok(66));
+    #[cfg(feature = "alloc")]
+    assert_eq!(&*sketch.encoded(), &frame[..]);
     assert_eq!(HyperLogLog::<64>::decode(&frame), Ok(sketch));
 
     assert_eq!(
@@ -144,6 +148,7 @@ fn frames_round_trip_and_reject_foreign_bytes() {
     );
 }
 
+#[cfg(feature = "std")]
 #[test]
 fn standard_error_follows_the_register_count() {
     assert!((HyperLogLog::<1024>::standard_error() - 0.0325).abs() < 0.0001);

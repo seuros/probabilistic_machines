@@ -3,13 +3,14 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
+use bytes::Bytes;
 use magnus::scan_args::scan_args;
 use magnus::typed_data::Obj;
-use magnus::{Error, RArray, RHash, RModule, Ruby, Value, function, method, prelude::*};
-use probabilistic_machines::{HeavyHitters, hash64};
+use magnus::{Error, RArray, RHash, RModule, RString, Ruby, Value, function, method, prelude::*};
+use probabilistic_machines::{CodecError, HeavyHitters, hash64};
 
 use crate::data::hitter;
-use crate::{mismatch, optional_kwarg, required_kwarg, unsupported};
+use crate::{codec_error, mismatch, optional_kwarg, required_kwarg, unsupported, unsupported_blob};
 
 /// Counter counts [`Table`] is monomorphised for.
 const COUNTERS: [usize; 3] = [16, 64, 256];
@@ -46,19 +47,109 @@ const fn counters_of<const K: usize>(_: &HeavyHitters<u64, K>) -> usize {
     K
 }
 
+const fn frame_len_of<const K: usize>(_: &HeavyHitters<u64, K>) -> usize {
+    HeavyHitters::<u64, K>::ENCODED_LEN
+}
+
+/// Each shape is constructed behind its own call frame. Inlined, a debug build
+/// sizes one frame for every arm of the dispatch match at once.
+#[inline(never)]
+fn boxed_new<const K: usize>() -> Box<HeavyHitters<u64, K>> {
+    Box::new(HeavyHitters::new())
+}
+
+#[inline(never)]
+fn boxed_decode<const K: usize>(
+    ruby: &Ruby,
+    frame: &[u8],
+) -> Result<Box<HeavyHitters<u64, K>>, Error> {
+    let mut table = boxed_new::<K>();
+    table
+        .decode_into(frame)
+        .map_err(|error| codec_error(ruby, error))?;
+    Ok(table)
+}
+
+/// A `usize` as the key table's 64-bit little-endian length field.
+fn length_field(length: usize) -> [u8; 8] {
+    let mut field = [0_u8; 8];
+    for (slot, byte) in field.iter_mut().zip(length.to_le_bytes()) {
+        *slot = byte;
+    }
+    field
+}
+
+fn bad_key_table(ruby: &Ruby, reason: &str) -> Error {
+    Error::new(
+        ruby.exception_arg_error(),
+        format!("the blob's key table {reason}"),
+    )
+}
+
+/// Reads the name records that follow the core frame back into the
+/// hash-to-name map.
+fn key_table(ruby: &Ruby, mut records: &[u8]) -> Result<HashMap<u64, String>, Error> {
+    let mut names = HashMap::new();
+    while !records.is_empty() {
+        let Some((field, tail)) = records.split_first_chunk::<8>() else {
+            return Err(bad_key_table(ruby, "ends inside a record header"));
+        };
+        let Ok(length) = usize::try_from(u64::from_le_bytes(*field)) else {
+            return Err(bad_key_table(ruby, "names a key this platform cannot hold"));
+        };
+        let Some((name, tail)) = tail.split_at_checked(length) else {
+            return Err(bad_key_table(ruby, "ends inside a key"));
+        };
+        let Ok(name) = str::from_utf8(name) else {
+            return Err(bad_key_table(ruby, "holds a key that is not UTF-8"));
+        };
+        names.insert(hash64(name.as_bytes()), name.to_owned());
+        records = tail;
+    }
+    Ok(names)
+}
+
 impl Wrapper {
     fn new(ruby: &Ruby, args: &[Value]) -> Result<Self, Error> {
         let args = scan_args::<(), (), (), (), RHash, ()>(args)?;
         let counters: usize = required_kwarg(args.keywords, "k")?;
         let table = match counters {
-            16 => Table::K16(Box::new(HeavyHitters::new())),
-            64 => Table::K64(Box::new(HeavyHitters::new())),
-            256 => Table::K256(Box::new(HeavyHitters::new())),
+            16 => Table::K16(boxed_new::<16>()),
+            64 => Table::K64(boxed_new::<64>()),
+            256 => Table::K256(boxed_new::<256>()),
             _ => return Err(unsupported(ruby, "k", counters, &COUNTERS)),
         };
         Ok(Self {
             table: RefCell::new(table),
             names: RefCell::new(HashMap::new()),
+        })
+    }
+
+    /// Reads a blob written by [`dump`](Self::dump).
+    fn load(ruby: &Ruby, blob: Bytes) -> Result<Self, Error> {
+        let Some(shape) = blob.get(1..3) else {
+            return Err(codec_error(ruby, CodecError::Truncated));
+        };
+        let counters = u16::from_le_bytes([shape[0], shape[1]]);
+        let table = match counters {
+            16 => Table::K16(boxed_decode::<16>(ruby, &blob)?),
+            64 => Table::K64(boxed_decode::<64>(ruby, &blob)?),
+            256 => Table::K256(boxed_decode::<256>(ruby, &blob)?),
+            _ => return Err(unsupported_blob(ruby, "counter count", &COUNTERS)),
+        };
+
+        let frame_len = table!(&table, |inner| frame_len_of(&**inner));
+        let names = key_table(ruby, &blob[frame_len..])?;
+        let unnamed = table!(&table, |inner| inner
+            .hitters()
+            .any(|entry| !names.contains_key(&entry.key)));
+        if unnamed {
+            return Err(bad_key_table(ruby, "does not name every tracked key"));
+        }
+
+        Ok(Self {
+            table: RefCell::new(table),
+            names: RefCell::new(names),
         })
     }
 
@@ -117,6 +208,31 @@ impl Wrapper {
         Ok(rb_self)
     }
 
+    /// The core frame followed by the names of the keys it tracks.
+    ///
+    /// ```text
+    /// core frame   HeavyHitters::<u64, k>::ENCODED_LEN bytes, tag 0xB1
+    /// name record  u64 little-endian byte length, then that many UTF-8 bytes
+    /// ```
+    ///
+    /// One record per tracked key, in the core frame's order, filling the rest
+    /// of the blob. The table counts key hashes, so [`load`](Self::load)
+    /// rehashes each name to rebuild the hash-to-name map `top` and `ranked`
+    /// read.
+    fn dump(ruby: &Ruby, rb_self: &Self) -> RString {
+        let (frame, keys) = table!(&*rb_self.table.borrow(), |table| (
+            table.encoded(),
+            table.hitters().map(|entry| entry.key).collect::<Vec<u64>>()
+        ));
+        let names = rb_self.names.borrow();
+        let mut blob = Vec::from(frame);
+        for name in keys.iter().filter_map(|key| names.get(key)) {
+            blob.extend_from_slice(&length_field(name.len()));
+            blob.extend_from_slice(name.as_bytes());
+        }
+        ruby.str_from_slice(&blob)
+    }
+
     fn inspect(&self) -> String {
         format!(
             "#<ProbabilisticMachines::HeavyHitters k={} tracked={} observed={}>",
@@ -164,6 +280,7 @@ impl Wrapper {
 pub fn define(ruby: &Ruby, module: RModule) -> Result<(), Error> {
     let class = module.define_class("HeavyHitters", ruby.class_object())?;
     class.define_singleton_method("new", function!(Wrapper::new, -1))?;
+    class.define_singleton_method("load", function!(Wrapper::load, 1))?;
     class.define_method("k", method!(Wrapper::counters, 0))?;
     class.define_method("add", method!(Wrapper::add, -1))?;
     class.define_method("count", method!(Wrapper::count, 1))?;
@@ -173,6 +290,7 @@ pub fn define(ruby: &Ruby, module: RModule) -> Result<(), Error> {
     class.define_method("top", method!(Wrapper::top, 1))?;
     class.define_method("ranked", method!(Wrapper::ranked, 0))?;
     class.define_method("merge", method!(Wrapper::merge, 1))?;
+    class.define_method("dump", method!(Wrapper::dump, 0))?;
     class.define_method("inspect", method!(Wrapper::inspect, 0))?;
     Ok(())
 }

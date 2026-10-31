@@ -1,4 +1,5 @@
 use super::HeavyHitters;
+use crate::CodecError;
 
 #[test]
 fn a_key_above_one_over_k_is_always_tracked() {
@@ -90,6 +91,7 @@ fn counters_saturate_instead_of_wrapping() {
     assert_eq!(table.observed(), u64::MAX);
 }
 
+#[cfg(feature = "alloc")]
 #[test]
 fn ranking_puts_the_loudest_first() {
     let mut table = HeavyHitters::<u32, 8>::new();
@@ -100,4 +102,61 @@ fn ranking_puts_the_loudest_first() {
     let ranked = table.ranked();
     let keys: alloc::vec::Vec<u32> = ranked.iter().map(|hitter| hitter.key).collect();
     assert_eq!(keys, [3, 2, 1]);
+}
+
+#[test]
+fn frames_round_trip_and_reject_foreign_bytes() {
+    let mut table = HeavyHitters::<u64, 8>::new();
+    for key in 0..20_u64 {
+        table.add_count(key, key * 10);
+    }
+
+    let mut frame = [0_u8; HeavyHitters::<u64, 8>::ENCODED_LEN];
+    assert_eq!(table.encode(&mut frame), Ok(13 + 8 * 24));
+    #[cfg(feature = "alloc")]
+    assert_eq!(&*table.encoded(), &frame[..]);
+    assert_eq!(HeavyHitters::<u64, 8>::decode(&frame), Ok(table.clone()));
+
+    let short = frame.len() - 1;
+    assert_eq!(
+        table.encode(&mut frame[..short]),
+        Err(CodecError::Truncated)
+    );
+    assert_eq!(
+        HeavyHitters::<u64, 8>::decode(&frame[..short]),
+        Err(CodecError::Truncated)
+    );
+
+    let mut wrong = frame;
+    wrong[0] = 0x00;
+    assert_eq!(HeavyHitters::<u64, 8>::decode(&wrong), Err(CodecError::Tag));
+
+    let mut lying = frame;
+    lying[1] = 4;
+    assert_eq!(
+        HeavyHitters::<u64, 8>::decode(&lying),
+        Err(CodecError::Parameters)
+    );
+
+    let mut overfull = frame;
+    overfull[11] = 9;
+    assert_eq!(
+        HeavyHitters::<u64, 8>::decode(&overfull),
+        Err(CodecError::Parameters)
+    );
+}
+
+#[cfg(feature = "alloc")]
+#[test]
+fn an_empty_table_round_trips() {
+    let table = HeavyHitters::<u64, 4>::new();
+    assert_eq!(HeavyHitters::<u64, 4>::decode(&table.encoded()), Ok(table));
+}
+
+#[test]
+fn a_frame_from_another_structure_is_refused() {
+    let counters = crate::CountMinSketch::<4, 2>::new();
+    let mut frame = [0_u8; HeavyHitters::<u64, 8>::ENCODED_LEN];
+    assert_eq!(counters.encode(&mut frame), Ok(11 + 4 * 2 * 4));
+    assert_eq!(HeavyHitters::<u64, 8>::decode(&frame), Err(CodecError::Tag));
 }

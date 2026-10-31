@@ -42,17 +42,6 @@ const fn capacity_of<const B: usize>(_: &CuckooFilter<B>) -> usize {
     CuckooFilter::<B>::CAPACITY
 }
 
-fn encode_frame<const B: usize>(filter: &CuckooFilter<B>) -> Result<Vec<u8>, CodecError> {
-    let mut frame = vec![0_u8; CuckooFilter::<B>::ENCODED_LEN];
-    let length = filter.encode(&mut frame)?;
-    frame.truncate(length);
-    Ok(frame)
-}
-
-fn decode_frame<const B: usize>(ruby: &Ruby, frame: &[u8]) -> Result<CuckooFilter<B>, Error> {
-    CuckooFilter::decode(frame).map_err(|error| codec_error(ruby, error))
-}
-
 /// Each shape is constructed behind its own call frame. Inlined, a debug build
 /// sizes one frame for every arm of the match below at once.
 #[inline(never)]
@@ -62,7 +51,11 @@ fn boxed_new<const N: usize>() -> Box<CuckooFilter<N>> {
 
 #[inline(never)]
 fn boxed_decode<const N: usize>(ruby: &Ruby, frame: &[u8]) -> Result<Box<CuckooFilter<N>>, Error> {
-    Ok(Box::new(decode_frame(ruby, frame)?))
+    let mut filter = boxed_new::<N>();
+    filter
+        .decode_into(frame)
+        .map_err(|error| codec_error(ruby, error))?;
+    Ok(filter)
 }
 
 impl Wrapper {
@@ -123,10 +116,9 @@ impl Wrapper {
         filter!(&*self.0.borrow(), |filter| filter.is_empty())
     }
 
-    fn dump(ruby: &Ruby, rb_self: &Self) -> Result<RString, Error> {
-        let frame = filter!(&*rb_self.0.borrow(), |filter| encode_frame(&**filter))
-            .map_err(|error| codec_error(ruby, error))?;
-        Ok(ruby.str_from_slice(&frame))
+    fn dump(ruby: &Ruby, rb_self: &Self) -> RString {
+        let frame = filter!(&*rb_self.0.borrow(), |filter| filter.encoded());
+        ruby.str_from_slice(&frame)
     }
 
     fn inspect(&self) -> String {

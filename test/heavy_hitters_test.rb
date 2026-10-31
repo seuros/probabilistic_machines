@@ -82,6 +82,41 @@ module ProbabilisticMachines
       assert_equal %w[ip-1 ip-2], left.top(2).map(&:key)
     end
 
+    def test_dump_load_round_trips_with_the_original_keys
+      table = HeavyHitters.new(k: 16)
+      5_000.times { |id| table.add("ip-#{id}") }
+      1_000.times { table.add('ip-hot', count: 2) }
+      blob = table.dump
+
+      assert_equal Encoding::BINARY, blob.encoding
+      assert_equal 13 + (16 * 24), HeavyHitters.new(k: 16).dump.bytesize
+
+      restored = HeavyHitters.load(blob)
+
+      assert_equal [16, table.observed, table.size], [restored.k, restored.observed, restored.size]
+      assert_equal table.ranked.map(&:key), restored.ranked.map(&:key)
+      assert_equal table.ranked.map(&:count), restored.ranked.map(&:count)
+      assert_equal table.ranked.map(&:overestimate), restored.ranked.map(&:overestimate)
+      assert_equal table.count('ip-hot'), restored.count('ip-hot')
+    end
+
+    def test_load_rejects_a_blob_it_did_not_write
+      assert_raises(ArgumentError) { HeavyHitters.load('') }
+      assert_raises(ArgumentError) { HeavyHitters.load(HyperLogLog.new(registers: 1024).dump) }
+      assert_raises(ArgumentError) { HeavyHitters.load("\xb1\x20\x00".b + ("\x00".b * 800)) }
+
+      blob = HeavyHitters.new(k: 16).dump
+
+      assert_raises(ArgumentError) { HeavyHitters.load(blob.byteslice(0, 100)) }
+    end
+
+    def test_load_rejects_a_blob_whose_keys_went_missing
+      table = HeavyHitters.new(k: 16)
+      table.add('ip-1')
+
+      assert_raises(ArgumentError) { HeavyHitters.load(table.dump.byteslice(0, 13 + (16 * 24))) }
+    end
+
     def test_merge_rejects_another_counter_count
       assert_raises(ArgumentError) { HeavyHitters.new(k: 16).merge(HeavyHitters.new(k: 64)) }
     end

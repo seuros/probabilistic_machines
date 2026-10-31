@@ -140,10 +140,24 @@ impl<const M: usize> HyperLogLog<M> {
         let Some(frame) = out.get_mut(..Self::ENCODED_LEN) else {
             return Err(CodecError::Truncated);
         };
+        self.write_frame(frame);
+        Ok(Self::ENCODED_LEN)
+    }
+
+    /// The sketch's frame, exactly [`ENCODED_LEN`](Self::ENCODED_LEN) bytes.
+    #[cfg(feature = "alloc")]
+    #[must_use]
+    pub fn encoded(&self) -> alloc::boxed::Box<[u8]> {
+        let mut frame = alloc::vec![0_u8; Self::ENCODED_LEN].into_boxed_slice();
+        self.write_frame(&mut frame);
+        frame
+    }
+
+    /// Fills a frame of exactly [`ENCODED_LEN`](Self::ENCODED_LEN) bytes.
+    fn write_frame(&self, frame: &mut [u8]) {
         frame[0] = TAG_HYPERLOGLOG;
         frame[1] = u32_low_u8(Self::PRECISION);
         frame[2..].copy_from_slice(&self.registers);
-        Ok(Self::ENCODED_LEN)
     }
 
     /// Reads a sketch written by [`encode`](Self::encode).
@@ -154,6 +168,20 @@ impl<const M: usize> HyperLogLog<M> {
     /// when it holds another structure, [`CodecError::Parameters`] when it was
     /// written with a different register count.
     pub fn decode(bytes: &[u8]) -> Result<Self, CodecError> {
+        let mut sketch = Self::new();
+        sketch.decode_into(bytes)?;
+        Ok(sketch)
+    }
+
+    /// Reads a frame over this sketch, for a caller that owns one already and
+    /// has no room on its stack for a second.
+    ///
+    /// The sketch is untouched when the frame is rejected.
+    ///
+    /// # Errors
+    ///
+    /// The same as [`decode`](Self::decode).
+    pub fn decode_into(&mut self, bytes: &[u8]) -> Result<(), CodecError> {
         let Some(frame) = bytes.get(..Self::ENCODED_LEN) else {
             return Err(CodecError::Truncated);
         };
@@ -163,9 +191,8 @@ impl<const M: usize> HyperLogLog<M> {
         if frame[1] != u32_low_u8(Self::PRECISION) {
             return Err(CodecError::Parameters);
         }
-        let mut registers = [0_u8; M];
-        registers.copy_from_slice(&frame[2..]);
-        Ok(Self { registers })
+        self.registers.copy_from_slice(&frame[2..]);
+        Ok(())
     }
 }
 

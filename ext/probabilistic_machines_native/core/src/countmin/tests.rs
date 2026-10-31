@@ -94,6 +94,8 @@ fn frames_round_trip_and_reject_foreign_bytes() {
 
     let mut frame = [0_u8; CountMinSketch::<32, 3>::ENCODED_LEN];
     assert_eq!(sketch.encode(&mut frame), Ok(11 + 32 * 3 * 4));
+    #[cfg(feature = "alloc")]
+    assert_eq!(&*sketch.encoded(), &frame[..]);
     assert_eq!(CountMinSketch::<32, 3>::decode(&frame), Ok(sketch.clone()));
 
     let short = frame.len() - 1;

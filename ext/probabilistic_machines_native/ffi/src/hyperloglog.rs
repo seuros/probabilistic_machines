@@ -44,17 +44,6 @@ fn standard_error_of<const M: usize>(_: &HyperLogLog<M>) -> f64 {
     HyperLogLog::<M>::standard_error()
 }
 
-fn encode_frame<const M: usize>(sketch: &HyperLogLog<M>) -> Result<Vec<u8>, CodecError> {
-    let mut frame = vec![0_u8; HyperLogLog::<M>::ENCODED_LEN];
-    let length = sketch.encode(&mut frame)?;
-    frame.truncate(length);
-    Ok(frame)
-}
-
-fn decode_frame<const M: usize>(ruby: &Ruby, frame: &[u8]) -> Result<HyperLogLog<M>, Error> {
-    HyperLogLog::decode(frame).map_err(|error| codec_error(ruby, error))
-}
-
 /// Each shape is constructed behind its own call frame. Inlined, a debug build
 /// sizes one frame for every arm of the match below at once.
 #[inline(never)]
@@ -64,7 +53,11 @@ fn boxed_new<const N: usize>() -> Box<HyperLogLog<N>> {
 
 #[inline(never)]
 fn boxed_decode<const N: usize>(ruby: &Ruby, frame: &[u8]) -> Result<Box<HyperLogLog<N>>, Error> {
-    Ok(Box::new(decode_frame(ruby, frame)?))
+    let mut sketch = boxed_new::<N>();
+    sketch
+        .decode_into(frame)
+        .map_err(|error| codec_error(ruby, error))?;
+    Ok(sketch)
 }
 
 impl Wrapper {
@@ -131,10 +124,9 @@ impl Wrapper {
         Ok(rb_self)
     }
 
-    fn dump(ruby: &Ruby, rb_self: &Self) -> Result<RString, Error> {
-        let frame = sketch!(&*rb_self.0.borrow(), |sketch| encode_frame(&**sketch))
-            .map_err(|error| codec_error(ruby, error))?;
-        Ok(ruby.str_from_slice(&frame))
+    fn dump(ruby: &Ruby, rb_self: &Self) -> RString {
+        let frame = sketch!(&*rb_self.0.borrow(), |sketch| sketch.encoded());
+        ruby.str_from_slice(&frame)
     }
 
     fn inspect(&self) -> String {

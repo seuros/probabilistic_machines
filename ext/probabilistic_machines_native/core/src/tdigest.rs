@@ -2,7 +2,7 @@
 
 use alloc::vec::Vec;
 
-use crate::{CodecError, TAG_TDIGEST};
+use crate::{CodecError, TAG_TDIGEST, read8};
 
 const HEADER_LEN: usize = 27;
 const CENTROID_LEN: usize = 16;
@@ -252,6 +252,20 @@ impl TDigest {
         let Some(frame) = out.get_mut(..length) else {
             return Err(CodecError::Truncated);
         };
+        self.write_frame(frame);
+        Ok(length)
+    }
+
+    /// The digest's frame, exactly [`encoded_len`](Self::encoded_len) bytes.
+    #[must_use]
+    pub fn encoded(&self) -> alloc::boxed::Box<[u8]> {
+        let mut frame = alloc::vec![0_u8; self.encoded_len()].into_boxed_slice();
+        self.write_frame(&mut frame);
+        frame
+    }
+
+    /// Fills a frame of exactly [`encoded_len`](Self::encoded_len) bytes.
+    fn write_frame(&self, frame: &mut [u8]) {
         frame[0] = TAG_TDIGEST;
         frame[1..3].copy_from_slice(&self.compression.to_le_bytes());
         frame[3..11].copy_from_slice(&self.count.to_le_bytes());
@@ -263,7 +277,6 @@ impl TDigest {
             slot[..8].copy_from_slice(&centroid.mean.to_le_bytes());
             slot[8..].copy_from_slice(&centroid.weight.to_le_bytes());
         }
-        Ok(length)
     }
 
     /// Reads a digest written by [`encode`](Self::encode).
@@ -304,12 +317,6 @@ impl TDigest {
     fn capacity(&self) -> usize {
         usize::from(self.compression) * 10
     }
-}
-
-const fn read8(bytes: &[u8]) -> [u8; 8] {
-    let mut buffer = [0_u8; 8];
-    buffer.copy_from_slice(bytes);
-    buffer
 }
 
 fn lerp(at: f64, low_x: f64, low_y: f64, high_x: f64, high_y: f64) -> f64 {

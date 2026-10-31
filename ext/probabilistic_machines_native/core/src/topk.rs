@@ -1,5 +1,11 @@
 //! Which keys dominate a stream, in `K` counters instead of one per key.
 
+use crate::hash::usize_low_u16;
+use crate::{CodecError, TAG_TOPK, read8};
+
+const HEADER_LEN: usize = 13;
+const RECORD_LEN: usize = 24;
+
 /// A tracked key, its counter, and how much of that counter it may have
 /// inherited from keys evicted before it.
 ///
@@ -137,6 +143,111 @@ impl<T: Copy + Eq, const K: usize> HeavyHitters<T, K> {
             count: floor.saturating_add(count),
             overestimate: floor.saturating_add(overestimate),
         };
+    }
+}
+
+impl<const K: usize> HeavyHitters<u64, K> {
+    /// `K` as the frame's shape field.
+    const COUNTERS: [u8; 2] = {
+        assert!(K >= 1, "a table needs at least one counter");
+        assert!(K < 1 << 16, "a table needs fewer than 65536 counters");
+        usize_low_u16(K).to_le_bytes()
+    };
+
+    /// Length of the [`encode`](Self::encode) frame.
+    pub const ENCODED_LEN: usize = HEADER_LEN + K * RECORD_LEN;
+
+    /// Writes the table into `out`, returning the number of bytes written.
+    ///
+    /// The frame is the tag, `K`, the observation count, the number of tracked
+    /// keys and `K` records of key, count and overestimate. Records past the
+    /// tracked count are zero.
+    ///
+    /// # Errors
+    ///
+    /// [`CodecError::Truncated`] when `out` is shorter than
+    /// [`ENCODED_LEN`](Self::ENCODED_LEN).
+    pub fn encode(&self, out: &mut [u8]) -> Result<usize, CodecError> {
+        let Some(frame) = out.get_mut(..Self::ENCODED_LEN) else {
+            return Err(CodecError::Truncated);
+        };
+        self.write_frame(frame);
+        Ok(Self::ENCODED_LEN)
+    }
+
+    /// The table's frame, exactly [`ENCODED_LEN`](Self::ENCODED_LEN) bytes.
+    #[cfg(feature = "alloc")]
+    #[must_use]
+    pub fn encoded(&self) -> alloc::boxed::Box<[u8]> {
+        let mut frame = alloc::vec![0_u8; Self::ENCODED_LEN].into_boxed_slice();
+        self.write_frame(&mut frame);
+        frame
+    }
+
+    /// Fills a frame of exactly [`ENCODED_LEN`](Self::ENCODED_LEN) bytes.
+    fn write_frame(&self, frame: &mut [u8]) {
+        frame[0] = TAG_TOPK;
+        frame[1..3].copy_from_slice(&Self::COUNTERS);
+        frame[3..11].copy_from_slice(&self.observed.to_le_bytes());
+        frame[11..13].copy_from_slice(&usize_low_u16(self.len()).to_le_bytes());
+        frame[HEADER_LEN..].fill(0);
+
+        let (slots, _) = frame[HEADER_LEN..].as_chunks_mut::<RECORD_LEN>();
+        for (slot, hitter) in slots.iter_mut().zip(self.hitters()) {
+            slot[..8].copy_from_slice(&hitter.key.to_le_bytes());
+            slot[8..16].copy_from_slice(&hitter.count.to_le_bytes());
+            slot[16..].copy_from_slice(&hitter.overestimate.to_le_bytes());
+        }
+    }
+
+    /// Reads a table written by [`encode`](Self::encode).
+    ///
+    /// # Errors
+    ///
+    /// [`CodecError::Truncated`] when `bytes` is too short, [`CodecError::Tag`]
+    /// when it holds another structure, [`CodecError::Parameters`] when it was
+    /// written with a different counter count or claims more tracked keys than
+    /// `K`.
+    pub fn decode(bytes: &[u8]) -> Result<Self, CodecError> {
+        let mut table = Self::new();
+        table.decode_into(bytes)?;
+        Ok(table)
+    }
+
+    /// Reads a frame over this table, for a caller that owns one already and
+    /// has no room on its stack for a second.
+    ///
+    /// The table is untouched when the frame is rejected.
+    ///
+    /// # Errors
+    ///
+    /// The same as [`decode`](Self::decode).
+    pub fn decode_into(&mut self, bytes: &[u8]) -> Result<(), CodecError> {
+        let Some(frame) = bytes.get(..Self::ENCODED_LEN) else {
+            return Err(CodecError::Truncated);
+        };
+        if frame[0] != TAG_TOPK {
+            return Err(CodecError::Tag);
+        }
+        if frame[1..3] != Self::COUNTERS {
+            return Err(CodecError::Parameters);
+        }
+        let tracked = usize::from(u16::from_le_bytes([frame[11], frame[12]]));
+        if tracked > K {
+            return Err(CodecError::Parameters);
+        }
+
+        self.observed = u64::from_le_bytes(read8(&frame[3..11]));
+        let (slots, _) = frame[HEADER_LEN..].as_chunks::<RECORD_LEN>();
+        for (slot, record) in self.slots.iter_mut().zip(&slots[..tracked]) {
+            *slot = Some(Hitter {
+                key: u64::from_le_bytes(read8(&record[..8])),
+                count: u64::from_le_bytes(read8(&record[8..16])),
+                overestimate: u64::from_le_bytes(read8(&record[16..])),
+            });
+        }
+        self.slots[tracked..].fill(None);
+        Ok(())
     }
 }
 

@@ -81,14 +81,8 @@ impl Wrapper {
         rb_self
     }
 
-    fn dump(ruby: &Ruby, rb_self: &Self) -> Result<RString, Error> {
-        let digest = rb_self.0.borrow();
-        let mut frame = vec![0_u8; digest.encoded_len()];
-        let length = digest
-            .encode(&mut frame)
-            .map_err(|error| codec_error(ruby, error))?;
-        frame.truncate(length);
-        Ok(ruby.str_from_slice(&frame))
+    fn dump(ruby: &Ruby, rb_self: &Self) -> RString {
+        ruby.str_from_slice(&rb_self.0.borrow().encoded())
     }
 
     fn inspect(&self) -> String {

@@ -170,6 +170,21 @@ impl<const B: usize> CuckooFilter<B> {
         let Some(frame) = out.get_mut(..Self::ENCODED_LEN) else {
             return Err(CodecError::Truncated);
         };
+        self.write_frame(frame);
+        Ok(Self::ENCODED_LEN)
+    }
+
+    /// The filter's frame, exactly [`ENCODED_LEN`](Self::ENCODED_LEN) bytes.
+    #[cfg(feature = "alloc")]
+    #[must_use]
+    pub fn encoded(&self) -> alloc::boxed::Box<[u8]> {
+        let mut frame = alloc::vec![0_u8; Self::ENCODED_LEN].into_boxed_slice();
+        self.write_frame(&mut frame);
+        frame
+    }
+
+    /// Fills a frame of exactly [`ENCODED_LEN`](Self::ENCODED_LEN) bytes.
+    fn write_frame(&self, frame: &mut [u8]) {
         frame[0] = TAG_CUCKOO;
         frame[1] = u32_low_u8(B.trailing_zeros());
 
@@ -177,7 +192,6 @@ impl<const B: usize> CuckooFilter<B> {
         for (slot, value) in frame[2..].iter_mut().zip(fingerprints) {
             *slot = *value;
         }
-        Ok(Self::ENCODED_LEN)
     }
 
     /// Reads a filter written by [`encode`](Self::encode).
@@ -188,6 +202,20 @@ impl<const B: usize> CuckooFilter<B> {
     /// when it holds another structure, [`CodecError::Parameters`] when it was
     /// written with a different bucket count.
     pub fn decode(bytes: &[u8]) -> Result<Self, CodecError> {
+        let mut filter = Self::new();
+        filter.decode_into(bytes)?;
+        Ok(filter)
+    }
+
+    /// Reads a frame over this filter, for a caller that owns one already and
+    /// has no room on its stack for a second.
+    ///
+    /// The filter is untouched when the frame is rejected.
+    ///
+    /// # Errors
+    ///
+    /// The same as [`decode`](Self::decode).
+    pub fn decode_into(&mut self, bytes: &[u8]) -> Result<(), CodecError> {
         let Some(frame) = bytes.get(..Self::ENCODED_LEN) else {
             return Err(CodecError::Truncated);
         };
@@ -198,15 +226,15 @@ impl<const B: usize> CuckooFilter<B> {
             return Err(CodecError::Parameters);
         }
 
-        let mut filter = Self::new();
-        let fingerprints = filter.buckets.iter_mut().flatten();
+        self.items = 0;
+        let fingerprints = self.buckets.iter_mut().flatten();
         for (value, byte) in fingerprints.zip(&frame[2..]) {
             *value = *byte;
             if *byte != EMPTY {
-                filter.items += 1;
+                self.items += 1;
             }
         }
-        Ok(filter)
+        Ok(())
     }
 
     fn bucket(hash: u64) -> usize {

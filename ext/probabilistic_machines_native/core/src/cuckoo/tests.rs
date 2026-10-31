@@ -94,6 +94,8 @@ fn frames_round_trip_and_reject_foreign_bytes() {
 
     let mut frame = [0_u8; CuckooFilter::<128>::ENCODED_LEN];
     assert_eq!(filter.encode(&mut frame), Ok(2 + 128 * 4));
+    #[cfg(feature = "alloc")]
+    assert_eq!(&*filter.encoded(), &frame[..]);
     assert_eq!(CuckooFilter::<128>::decode(&frame), Ok(filter.clone()));
 
     let short = frame.len() - 1;

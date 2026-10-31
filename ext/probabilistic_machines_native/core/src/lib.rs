@@ -50,7 +50,16 @@ impl core::fmt::Display for CodecError {
 impl core::error::Error for CodecError {}
 
 pub(crate) const TAG_HYPERLOGLOG: u8 = 0xA1;
+pub(crate) const TAG_TOPK: u8 = 0xB1;
 pub(crate) const TAG_COUNTMIN: u8 = 0xC1;
 #[cfg(feature = "alloc")]
 pub(crate) const TAG_TDIGEST: u8 = 0xD1;
 pub(crate) const TAG_CUCKOO: u8 = 0xF1;
+
+/// The first eight bytes of a field, for the little-endian scalars the frames
+/// are built from.
+pub(crate) const fn read8(bytes: &[u8]) -> [u8; 8] {
+    let mut buffer = [0_u8; 8];
+    buffer.copy_from_slice(bytes);
+    buffer
+}

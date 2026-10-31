@@ -14,6 +14,11 @@
   fingerprint has nowhere to go.
 - `ProbabilisticMachines::HeavyHitters`: Space-Saving top-k over 16, 64 or 256
   counters, returning `Hitter` objects that carry the overestimate.
-- `dump`/`load` round-trip every sketch but `HeavyHitters` through the byte
-  format of the `probabilistic-machines` crate.
+- `dump`/`load` round-trip every sketch through the byte format of the
+  `probabilistic-machines` crate. A `HeavyHitters` blob is the crate's frame
+  followed by the extension's key table, so the tracked strings survive a
+  restart instead of loading back as hashes.
 - RBS signatures for the whole public API.
+- The `probabilistic-machines` crate codes `HeavyHitters<u64, K>`, and with
+  `alloc` hands every structure's frame back from `encoded` instead of filling
+  a caller's buffer, with `decode_into` to read one back in place.

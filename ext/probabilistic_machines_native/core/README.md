@@ -117,10 +117,32 @@ assert_eq!(sketch.encode(&mut frame), Ok(66));
 assert_eq!(HyperLogLog::<64>::decode(&frame), Ok(sketch));
 ```
 
+`HeavyHitters` codes only with `u64` keys, which is what a hash-keyed heavy
+hitter is; a general `T` has no byte form.
+
 `HyperLogLog`, `CountMinSketch`, `CuckooFilter` and `HeavyHitters` need no
 features at all and run on bare metal. `TDigest` needs `alloc`, since its
-cluster list grows and shrinks. `std` adds `HyperLogLog::standard_error` and
-`HeavyHitters::ranked`.
+cluster list grows and shrinks. `alloc` also adds `encoded`, which hands back
+an exactly-sized frame instead of filling a caller's buffer, so nothing has to
+thread an error that cannot happen:
+
+```rust
+use probabilistic_machines::CuckooFilter;
+
+let mut revoked = CuckooFilter::<64>::new();
+revoked.insert(b"token-aa31")?;
+
+let frame = revoked.encoded();
+assert_eq!(frame.len(), CuckooFilter::<64>::ENCODED_LEN);
+assert_eq!(CuckooFilter::<64>::decode(&frame), Ok(revoked));
+# Ok::<(), probabilistic_machines::cuckoo::Full>(())
+```
+
+`decode_into` is the reading half of the same idea: it reads a frame over a
+structure the caller already owns, so a 128 KiB sketch behind a `Box` is never
+copied through the stack.
+
+`std` adds `HyperLogLog::standard_error` and `HeavyHitters::ranked`.
 
 Accuracy is a function of the size you pick, and nothing here hides that:
 HyperLogLog's standard error is `1.04 / sqrt(M)`; count-min overshoots by more

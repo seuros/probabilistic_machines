@@ -1,7 +1,7 @@
 //! Frequency estimation for a stream nobody wants to store.
 
 use crate::hash::{hash64, mix64, u32_low_u8, u64_low_u16, usize_low_u8};
-use crate::{CodecError, TAG_COUNTMIN};
+use crate::{CodecError, TAG_COUNTMIN, read8};
 
 /// Counts how often each item appeared, in `W * D` counters.
 ///
@@ -116,6 +116,21 @@ impl<const W: usize, const D: usize> CountMinSketch<W, D> {
         let Some(frame) = out.get_mut(..Self::ENCODED_LEN) else {
             return Err(CodecError::Truncated);
         };
+        self.write_frame(frame);
+        Ok(Self::ENCODED_LEN)
+    }
+
+    /// The sketch's frame, exactly [`ENCODED_LEN`](Self::ENCODED_LEN) bytes.
+    #[cfg(feature = "alloc")]
+    #[must_use]
+    pub fn encoded(&self) -> alloc::boxed::Box<[u8]> {
+        let mut frame = alloc::vec![0_u8; Self::ENCODED_LEN].into_boxed_slice();
+        self.write_frame(&mut frame);
+        frame
+    }
+
+    /// Fills a frame of exactly [`ENCODED_LEN`](Self::ENCODED_LEN) bytes.
+    fn write_frame(&self, frame: &mut [u8]) {
         frame[0] = TAG_COUNTMIN;
         frame[1] = u32_low_u8(W.trailing_zeros());
         frame[2] = usize_low_u8(D);
@@ -126,7 +141,6 @@ impl<const W: usize, const D: usize> CountMinSketch<W, D> {
         for (slot, counter) in slots.iter_mut().zip(counters) {
             *slot = counter.to_le_bytes();
         }
-        Ok(Self::ENCODED_LEN)
     }
 
     /// Reads a sketch written by [`encode`](Self::encode).
@@ -137,6 +151,20 @@ impl<const W: usize, const D: usize> CountMinSketch<W, D> {
     /// when it holds another structure, [`CodecError::Parameters`] when its
     /// shape differs from `W` by `D`.
     pub fn decode(bytes: &[u8]) -> Result<Self, CodecError> {
+        let mut sketch = Self::new();
+        sketch.decode_into(bytes)?;
+        Ok(sketch)
+    }
+
+    /// Reads a frame over this sketch, for a caller that owns one already and
+    /// has no room on its stack for a second.
+    ///
+    /// The sketch is untouched when the frame is rejected.
+    ///
+    /// # Errors
+    ///
+    /// The same as [`decode`](Self::decode).
+    pub fn decode_into(&mut self, bytes: &[u8]) -> Result<(), CodecError> {
         let Some(frame) = bytes.get(..Self::ENCODED_LEN) else {
             return Err(CodecError::Truncated);
         };
@@ -147,17 +175,13 @@ impl<const W: usize, const D: usize> CountMinSketch<W, D> {
             return Err(CodecError::Parameters);
         }
 
-        let mut sketch = Self::new();
-        let mut total = [0_u8; 8];
-        total.copy_from_slice(&frame[3..11]);
-        sketch.total = u64::from_le_bytes(total);
-
-        let counters = sketch.rows.iter_mut().flatten();
+        self.total = u64::from_le_bytes(read8(&frame[3..11]));
+        let counters = self.rows.iter_mut().flatten();
         let (slots, _) = frame[11..].as_chunks::<4>();
         for (slot, counter) in slots.iter().zip(counters) {
             *counter = u32::from_le_bytes(*slot);
         }
-        Ok(sketch)
+        Ok(())
     }
 }
 

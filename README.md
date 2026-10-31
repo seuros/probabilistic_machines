@@ -136,14 +136,23 @@ ProbabilisticMachines::TDigest.load(blob)       # ArgumentError: codec: wrong st
 ```
 
 Anything that reads the crate reads these frames, so an embedded device can ship
-a sketch a Rails app folds in. `HeavyHitters` is the exception: the crate has no
-codec for it, so it has no `dump`.
+a sketch a Rails app folds in. `HeavyHitters` is the one blob that is not purely
+the crate's: the crate's frame counts 64-bit key hashes, so the extension appends
+its key table after it, one record of a 64-bit byte length and that many UTF-8
+bytes per tracked key. `load` rehashes each name, and rejects a blob whose key
+table is malformed or does not name every key the frame tracks.
+
+```ruby
+restored = ProbabilisticMachines::HeavyHitters.load(hh.dump)
+restored.top(1).first.key # => '10.0.0.1', the string, not its hash
+```
 
 ## Rust
 
 The sketches themselves are the `probabilistic-machines` crate under
 `ext/probabilistic_machines_native/core`: `no_std`, zero dependencies, allocating
-only for `TDigest`, and verified on bare metal. The binding crate beside it under
+only for `TDigest` and for the `encoded` frames this extension dumps, and
+verified on bare metal. The binding crate beside it under
 `ffi/` is the Ruby surface and is not published.
 
 ## License

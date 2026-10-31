@@ -146,6 +146,8 @@ module ProbabilisticMachines
     # `k` is 16, 64 or 256.
     def self.new: (k: Integer) -> instance
 
+    def self.load: (String blob) -> instance
+
     def k: () -> Integer
 
     # Keys are UTF-8 strings, so `top` and `ranked` can hand them back.
@@ -170,6 +172,9 @@ module ProbabilisticMachines
 
     # Folds `other` in. Raises `ArgumentError` on a different `k`.
     def merge: (HeavyHitters other) -> self
+
+    # The crate's frame followed by the key table that carries the strings.
+    def dump: () -> String
 
     def inspect: () -> String
   end

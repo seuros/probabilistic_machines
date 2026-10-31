@@ -79,5 +79,10 @@ pub(crate) const fn usize_low_u8(value: usize) -> u8 {
     value.to_le_bytes()[0]
 }
 
+pub(crate) const fn usize_low_u16(value: usize) -> u16 {
+    let [low, high, ..] = value.to_le_bytes();
+    u16::from_le_bytes([low, high])
+}
+
 #[cfg(test)]
 mod tests;

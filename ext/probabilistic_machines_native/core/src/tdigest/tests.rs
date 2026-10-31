@@ -159,6 +159,7 @@ fn frames_round_trip_every_bit_of_every_cluster() {
     let written = digest.encoded_len();
     let mut frame = alloc::vec![0_u8; written];
     assert_eq!(digest.encode(&mut frame), Ok(written));
+    assert_eq!(&*digest.encoded(), &frame[..]);
     assert_eq!(TDigest::decode(&frame), Ok(digest));
 }
 
