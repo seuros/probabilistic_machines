@@ -46,7 +46,7 @@ module ProbabilisticMachines
       blob = sketch.dump
 
       assert_equal Encoding::BINARY, blob.encoding
-      assert_equal 11 + (1024 * 8 * 4), blob.bytesize
+      assert_equal 12 + (1024 * 8 * 4), blob.bytesize
 
       restored = CountMinSketch.load(blob)
 
