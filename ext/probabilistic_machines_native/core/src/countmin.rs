@@ -3,6 +3,9 @@
 use crate::hash::{hash64, mix64, u32_low_u8, u64_low_u16, usize_low_u8};
 use crate::{CodecError, TAG_COUNTMIN, read8};
 
+const HEADER_LEN: usize = 12;
+const COUNTER_LEN: usize = 4;
+
 /// Counts how often each item appeared, in `W * D` counters.
 ///
 /// `W` is the row width, a power of two up to 65536; `D` is the number of rows.
@@ -41,7 +44,7 @@ impl<const W: usize, const D: usize> CountMinSketch<W, D> {
     };
 
     /// Length of the [`encode`](Self::encode) frame.
-    pub const ENCODED_LEN: usize = 12 + W * D * 4;
+    pub const ENCODED_LEN: usize = HEADER_LEN + W * D * COUNTER_LEN;
 
     #[must_use]
     pub const fn new() -> Self {
@@ -154,7 +157,7 @@ impl<const W: usize, const D: usize> CountMinSketch<W, D> {
         frame[11] = u8::from(self.saturated);
 
         let counters = self.rows.iter().flatten();
-        let (slots, _) = frame[12..].as_chunks_mut::<4>();
+        let (slots, _) = frame[HEADER_LEN..].as_chunks_mut::<COUNTER_LEN>();
         for (slot, counter) in slots.iter_mut().zip(counters) {
             *slot = counter.to_le_bytes();
         }
@@ -166,7 +169,7 @@ impl<const W: usize, const D: usize> CountMinSketch<W, D> {
     ///
     /// [`CodecError::Truncated`] when `bytes` is too short, [`CodecError::Tag`]
     /// when it holds another structure, [`CodecError::Parameters`] when its
-    /// shape differs from `W` by `D`.
+    /// shape differs from `W` by `D` or its counters contradict its total.
     pub fn decode(bytes: &[u8]) -> Result<Self, CodecError> {
         let mut sketch = Self::new();
         sketch.decode_into(bytes)?;
@@ -192,15 +195,38 @@ impl<const W: usize, const D: usize> CountMinSketch<W, D> {
             return Err(CodecError::Parameters);
         }
 
-        self.total = u64::from_le_bytes(read8(&frame[3..11]));
-        self.saturated = frame[11] != 0;
+        let total = u64::from_le_bytes(read8(&frame[3..11]));
+        let saturated = frame[11] != 0;
+        let (slots, _) = frame[HEADER_LEN..].as_chunks::<COUNTER_LEN>();
+        if !Self::rows_are_coherent(slots, total, saturated) {
+            return Err(CodecError::Parameters);
+        }
 
+        self.total = total;
+        self.saturated = saturated;
         let counters = self.rows.iter_mut().flatten();
-        let (slots, _) = frame[12..].as_chunks::<4>();
         for (slot, counter) in slots.iter().zip(counters) {
             *counter = u32::from_le_bytes(*slot);
         }
         Ok(())
+    }
+
+    /// Whether the counters carry the total the frame claims, as every sketch
+    /// built by adding items does: each row takes every count added, so it sums
+    /// to the total exactly. Only a counter stopped at [`u32::MAX`] can leave a
+    /// row short of it, and such a sketch says so in its saturation flag.
+    fn rows_are_coherent(slots: &[[u8; COUNTER_LEN]], total: u64, saturated: bool) -> bool {
+        slots.chunks(W).all(|row| {
+            let counted: u64 = row
+                .iter()
+                .map(|slot| u64::from(u32::from_le_bytes(*slot)))
+                .sum();
+            if saturated {
+                counted <= total
+            } else {
+                counted == total
+            }
+        })
     }
 }
 

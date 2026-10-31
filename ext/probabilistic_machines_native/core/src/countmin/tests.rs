@@ -123,6 +123,40 @@ fn frames_round_trip_and_reject_foreign_bytes() {
     );
 }
 
+// A frame whose total was edited down described counters no stream could have
+// filled, and the sketch read it back as an estimate above its own total.
+#[test]
+fn counters_the_total_cannot_explain_are_refused() {
+    let mut sketch = CountMinSketch::<32, 3>::new();
+    sketch.add_count(b"x", 10);
+
+    let mut frame = [0_u8; CountMinSketch::<32, 3>::ENCODED_LEN];
+    assert_eq!(sketch.encode(&mut frame), Ok(frame.len()));
+
+    let mut emptied = frame;
+    emptied[3] = 0;
+    assert_eq!(
+        CountMinSketch::<32, 3>::decode(&emptied),
+        Err(CodecError::Parameters)
+    );
+
+    let mut inflated = frame;
+    inflated[3] = 11;
+    assert_eq!(
+        CountMinSketch::<32, 3>::decode(&inflated),
+        Err(CodecError::Parameters)
+    );
+
+    let mut saturated = CountMinSketch::<32, 3>::new();
+    saturated.add_count(b"x", u32::MAX);
+    saturated.add(b"x");
+    assert!(saturated.saturated());
+    assert!(u64::from(saturated.estimate(b"x")) < saturated.total());
+
+    assert_eq!(saturated.encode(&mut frame), Ok(frame.len()));
+    assert_eq!(CountMinSketch::<32, 3>::decode(&frame), Ok(saturated));
+}
+
 #[test]
 fn a_single_row_still_counts() {
     let mut sketch = CountMinSketch::<4096, 1>::new();
