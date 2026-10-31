@@ -260,3 +260,27 @@ fn collapsing_opposite_sign_extremes_keeps_every_cluster_finite() {
     assert!((digest.quantile(0.0) + 1e308).abs() < f64::EPSILON);
     assert!((digest.quantile(1.0) - 1e308).abs() < f64::EPSILON);
 }
+
+// Interpolating between two endpoints divided by their span, which overflows
+// to infinity for opposite-sign extremes, so every finite value landed on the
+// low endpoint and the midpoint of a symmetric pair read as a quarter of the
+// stream instead of half.
+#[test]
+fn the_midpoint_of_opposite_sign_extremes_is_half_the_stream() {
+    let mut wide = TDigest::new(100);
+    wide.add(-f64::MAX);
+    wide.add(f64::MAX);
+
+    let middle = wide.cdf(0.0);
+    assert!((middle - 0.5).abs() < f64::EPSILON, "cdf(0) was {middle}");
+    assert!((wide.quantile(0.0) + f64::MAX).abs() < f64::EPSILON);
+    assert!((wide.quantile(1.0) - f64::MAX).abs() < f64::EPSILON);
+
+    let step = 2.0 * f64::EPSILON;
+    let mut narrow = TDigest::new(100);
+    narrow.add(1.0);
+    narrow.add(1.0 + step + step);
+
+    let halfway = narrow.cdf(1.0 + step);
+    assert!((halfway - 0.5).abs() < f64::EPSILON, "cdf was {halfway}");
+}

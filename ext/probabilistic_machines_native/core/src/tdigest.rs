@@ -397,11 +397,17 @@ fn fold(left: Centroid, right: Centroid) -> Centroid {
     }
 }
 
+/// Where `at` falls between two points, read off the line through them.
+///
+/// The fraction is taken at half scale for the same reason [`fold`] averages
+/// there: two opposite-sign extremes span more than [`f64::MAX`], and an
+/// infinite span made every finite `at` land on the low end.
 fn lerp(at: f64, low_x: f64, low_y: f64, high_x: f64, high_y: f64) -> f64 {
     if high_x <= low_x {
         return high_y;
     }
-    let fraction = (at - low_x) / (high_x - low_x);
+    let low = low_x * 0.5;
+    let fraction = at.mul_add(0.5, -low) / high_x.mul_add(0.5, -low);
     low_y.mul_add(1.0 - fraction, high_y * fraction)
 }
 
