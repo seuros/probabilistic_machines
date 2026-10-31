@@ -317,3 +317,32 @@ fn the_midpoint_of_opposite_sign_extremes_is_half_the_stream() {
     let halfway = narrow.cdf(1.0 + step);
     assert!((halfway - 0.5).abs() < f64::EPSILON, "cdf was {halfway}");
 }
+
+// Halving the span to keep an opposite-sign pair finite rounded a subnormal
+// span to zero, so two neighbouring subnormals divided zero by zero and the
+// cdf of the lower one came back NaN.
+#[test]
+fn a_subnormal_span_interpolates_without_rounding_to_zero() {
+    let smallest = f64::MIN_POSITIVE * f64::EPSILON;
+    let mut tiny = TDigest::new(100);
+    tiny.add(0.0);
+    tiny.add(smallest);
+
+    let low = tiny.cdf(0.0);
+    assert!((low - 0.25).abs() < f64::EPSILON, "cdf(0) was {low}");
+    assert!((tiny.cdf(smallest) - 1.0).abs() < f64::EPSILON);
+    assert!(tiny.quantile(0.0).total_cmp(&0.0).is_eq());
+    assert!(tiny.quantile(1.0).total_cmp(&smallest).is_eq());
+
+    let mut neighbours = TDigest::new(100);
+    neighbours.add(smallest);
+    neighbours.add(smallest * 3.0);
+    let between = neighbours.cdf(smallest * 2.0);
+    assert!((between - 0.5).abs() < f64::EPSILON, "cdf was {between}");
+
+    let mut wide = TDigest::new(100);
+    wide.add(-f64::MAX);
+    wide.add(f64::MAX);
+    let middle = wide.cdf(0.0);
+    assert!((middle - 0.5).abs() < f64::EPSILON, "cdf(0) was {middle}");
+}
