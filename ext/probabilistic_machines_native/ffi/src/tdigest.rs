@@ -9,7 +9,7 @@ use magnus::{Error, RArray, RHash, RModule, RString, Ruby, Value, function, meth
 use probabilistic_machines::TDigest;
 
 use crate::data::centroid;
-use crate::{codec_error, optional_kwarg, required_kwarg};
+use crate::{Whole, codec_error, optional_kwarg, required_kwarg};
 
 /// Below this the cluster budget is zero, so every point merges into one
 /// centroid and a quantile is meaningless.
@@ -21,7 +21,7 @@ struct Wrapper(RefCell<TDigest>);
 impl Wrapper {
     fn new(ruby: &Ruby, args: &[Value]) -> Result<Self, Error> {
         let args = scan_args::<(), (), (), (), RHash, ()>(args)?;
-        let compression: u16 = required_kwarg(args.keywords, "compression")?;
+        let Whole(compression) = required_kwarg::<Whole<u16>>(args.keywords, "compression")?;
         if compression < MIN_COMPRESSION {
             return Err(Error::new(
                 ruby.exception_arg_error(),
