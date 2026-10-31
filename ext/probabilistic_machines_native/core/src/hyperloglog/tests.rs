@@ -152,6 +152,28 @@ fn frames_round_trip_and_reject_foreign_bytes() {
     );
 }
 
+// A rank was only bounded by the hash width, so a frame could hold one from a
+// longer tail than its own precision leaves, which no sketch of that shape
+// writes.
+#[test]
+fn a_rank_the_precision_cannot_reach_is_refused() {
+    let mut sketch = HyperLogLog::<4096>::new();
+    sketch.add_hash(0);
+
+    let mut frame = [0_u8; HyperLogLog::<4096>::ENCODED_LEN];
+    assert_eq!(sketch.encode(&mut frame), Ok(frame.len()));
+    assert_eq!(frame[2], 53);
+
+    let mut longer = frame;
+    longer[2] = 54;
+    assert_eq!(
+        HyperLogLog::<4096>::decode(&longer),
+        Err(CodecError::Parameters)
+    );
+
+    assert_eq!(HyperLogLog::<4096>::decode(&frame), Ok(sketch));
+}
+
 #[cfg(feature = "std")]
 #[test]
 fn standard_error_follows_the_register_count() {

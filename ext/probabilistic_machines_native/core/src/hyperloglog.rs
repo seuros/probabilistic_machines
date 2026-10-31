@@ -6,6 +6,9 @@ use crate::{CodecError, TAG_HYPERLOGLOG};
 /// Odd terms of `2 * atanh(t) = ln((1 + t) / (1 - t))`, in Horner order.
 const ATANH_COEFFICIENTS: [f64; 5] = [2.0, 2.0 / 3.0, 0.4, 2.0 / 7.0, 2.0 / 9.0];
 
+/// Bits of hash a sketch splits into a register index and a leading-zero count.
+const HASH_BITS: u32 = 64;
+
 const POW2_NEG: [f64; 65] = {
     let mut table = [1.0; 65];
     let mut exponent = 1;
@@ -35,10 +38,6 @@ const POW2_NEG: [f64; 65] = {
 /// let error = (seen.estimate() - 100_000.0).abs() / 100_000.0;
 /// assert!(error < 0.05, "{error}");
 /// ```
-/// Highest rank a register can hold: one leading-zero count per bit of the
-/// hash, plus one.
-const MAX_RANK: u8 = 64;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HyperLogLog<const M: usize> {
     registers: [u8; M],
@@ -52,6 +51,11 @@ impl<const M: usize> HyperLogLog<M> {
         assert!(M <= 1 << 16, "register count must be at most 65536");
         M.trailing_zeros()
     };
+
+    /// Highest rank a register can hold: the index bits leave
+    /// `HASH_BITS - PRECISION` bits of hash, and a rank counts their leading
+    /// zeros plus one.
+    const MAX_RANK: u8 = u32_low_u8(HASH_BITS - Self::PRECISION + 1);
 
     /// Length of the [`encode`](Self::encode) frame.
     pub const ENCODED_LEN: usize = M + 2;
@@ -75,7 +79,7 @@ impl<const M: usize> HyperLogLog<M> {
     /// Records an item the caller already hashed, for keys that never existed
     /// as bytes.
     pub fn add_hash(&mut self, hash: u64) {
-        let index = usize::from(u64_low_u16(hash >> (64 - Self::PRECISION)));
+        let index = usize::from(u64_low_u16(hash >> (HASH_BITS - Self::PRECISION)));
         let rank = rank(hash, Self::PRECISION);
         if self.registers[index] < rank {
             self.registers[index] = rank;
@@ -170,7 +174,8 @@ impl<const M: usize> HyperLogLog<M> {
     ///
     /// [`CodecError::Truncated`] when `bytes` is too short, [`CodecError::Tag`]
     /// when it holds another structure, [`CodecError::Parameters`] when it was
-    /// written with a different register count.
+    /// written with a different register count or holds a rank the hash tail
+    /// its precision leaves cannot reach.
     pub fn decode(bytes: &[u8]) -> Result<Self, CodecError> {
         let mut sketch = Self::new();
         sketch.decode_into(bytes)?;
@@ -197,7 +202,7 @@ impl<const M: usize> HyperLogLog<M> {
         }
         let mut index = 0;
         while index < M {
-            if frame[2 + index] > MAX_RANK {
+            if frame[2 + index] > Self::MAX_RANK {
                 return Err(CodecError::Parameters);
             }
             index += 1;
