@@ -128,7 +128,9 @@ take any byte string.
 
 `dump` returns the crate's own byte frame, `load` reads one back. The frame
 names its own shape, so `load` needs no keyword and rejects a blob written with
-a size this build does not carry.
+a size this build does not carry. It also reads the frame's fields against each
+other and refuses a state no stream could have left behind, so an edited blob
+raises instead of handing back a sketch that counts more than it ever saw.
 
 ```ruby
 blob = hll.dump                                 # binary String
