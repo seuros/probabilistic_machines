@@ -54,7 +54,7 @@ module ProbabilisticMachines
       blob = digest.dump
 
       assert_equal Encoding::BINARY, blob.encoding
-      assert_equal 27 + (digest.size * 16), blob.bytesize
+      assert_equal 31 + (digest.size * 16), blob.bytesize
 
       restored = TDigest.load(blob)
 
@@ -66,6 +66,16 @@ module ProbabilisticMachines
       assert_raises(ArgumentError) { TDigest.load('') }
       assert_raises(ArgumentError) { TDigest.load(HyperLogLog.new(registers: 1024).dump) }
       assert_raises(ArgumentError) { TDigest.load("\xd1\x64\x00".b + ("\x00".b * 30)) }
+    end
+
+    def test_load_rejects_a_blob_that_lost_whole_centroids
+      digest = TDigest.new(compression: 10)
+      [1.0, 2.0, 3.0].each { |value| digest.add(value) }
+      blob = digest.dump
+
+      assert_raises(ArgumentError) { TDigest.load(blob.byteslice(0, 31)) }
+      assert_raises(ArgumentError) { TDigest.load(blob.byteslice(0, blob.bytesize - 16)) }
+      assert_equal 3.0, TDigest.load(blob).count
     end
 
     def test_merge_folds_both_streams

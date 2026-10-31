@@ -1,4 +1,4 @@
-use super::TDigest;
+use super::{CENTROID_LEN, HEADER_LEN, TDigest};
 use crate::CodecError;
 
 fn uniform(points: u32, compression: u16) -> TDigest {
@@ -174,12 +174,40 @@ fn frames_reject_foreign_bytes() {
     assert_eq!(TDigest::decode(&frame[..10]), Err(CodecError::Truncated));
     assert_eq!(
         TDigest::decode(&frame[..written - 1]),
-        Err(CodecError::Parameters)
+        Err(CodecError::Truncated)
     );
 
     let mut wrong = frame.clone();
     wrong[0] = 0x00;
     assert_eq!(TDigest::decode(&wrong), Err(CodecError::Tag));
+}
+
+// A body of whole cluster records passed for a whole digest, so dropping
+// records loaded a digest that kept the header's count: dropping all of them
+// left an empty digest reporting a positive count and answering NaN.
+#[test]
+fn a_frame_that_lost_whole_clusters_is_not_a_digest() {
+    let digest = uniform(3, 10);
+    let frame = digest.encoded();
+    let count = digest.count();
+
+    assert_eq!(
+        TDigest::decode(&frame[..HEADER_LEN]),
+        Err(CodecError::Truncated)
+    );
+    assert_eq!(
+        TDigest::decode(&frame[..frame.len() - CENTROID_LEN]),
+        Err(CodecError::Truncated)
+    );
+    assert_eq!(TDigest::decode(&frame), Ok(digest));
+
+    let mut heavier = frame.clone();
+    heavier[7..15].copy_from_slice(&(count * (1.0 + 1e-3)).to_le_bytes());
+    assert_eq!(TDigest::decode(&heavier), Err(CodecError::Parameters));
+
+    let mut drifted = frame;
+    drifted[7..15].copy_from_slice(&(count * (1.0 + 1e-9)).to_le_bytes());
+    assert_eq!(TDigest::decode(&drifted).map(|digest| digest.len()), Ok(3));
 }
 
 // Subtracting opposite-sign extremes overflowed before the multiply, so a

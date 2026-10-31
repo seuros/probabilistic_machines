@@ -4,11 +4,17 @@ use alloc::vec::Vec;
 
 use crate::{CodecError, TAG_TDIGEST, read8};
 
-const HEADER_LEN: usize = 27;
+const HEADER_LEN: usize = 31;
 const CENTROID_LEN: usize = 16;
 
 /// Clusters the digest may hold per unit of compression.
 const CLUSTERS_PER_COMPRESSION: usize = 10;
+
+/// How far a total summed one point at a time may sit from the sum of the
+/// clusters those points were folded into, relative to the total itself. Both
+/// sums round once per addition, so a stream of fractional weights long enough
+/// to exhaust this bound is one no `f64` total describes anyway.
+const WEIGHT_DRIFT: f64 = 1e-6;
 
 /// A weighted point: the mean of the values that collapsed into it.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -255,6 +261,10 @@ impl TDigest {
 
     /// Writes the digest into `out`, returning the number of bytes written.
     ///
+    /// The frame is a header of the tag, the compression, the cluster count,
+    /// the total weight and the two extremes, then a record of mean and weight
+    /// per cluster, every scalar little-endian.
+    ///
     /// # Errors
     ///
     /// [`CodecError::Truncated`] when `out` is shorter than
@@ -278,11 +288,17 @@ impl TDigest {
 
     /// Fills a frame of exactly [`encoded_len`](Self::encoded_len) bytes.
     fn write_frame(&self, frame: &mut [u8]) {
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "capacity caps the cluster count at compression * CLUSTERS_PER_COMPRESSION"
+        )]
+        let clusters = self.centroids.len() as u32;
         frame[0] = TAG_TDIGEST;
         frame[1..3].copy_from_slice(&self.compression.to_le_bytes());
-        frame[3..11].copy_from_slice(&self.count.to_le_bytes());
-        frame[11..19].copy_from_slice(&self.minimum.to_le_bytes());
-        frame[19..27].copy_from_slice(&self.maximum.to_le_bytes());
+        frame[3..7].copy_from_slice(&clusters.to_le_bytes());
+        frame[7..15].copy_from_slice(&self.count.to_le_bytes());
+        frame[15..23].copy_from_slice(&self.minimum.to_le_bytes());
+        frame[23..31].copy_from_slice(&self.maximum.to_le_bytes());
 
         let (slots, _) = frame[HEADER_LEN..].as_chunks_mut::<CENTROID_LEN>();
         for (slot, centroid) in slots.iter_mut().zip(&self.centroids) {
@@ -295,10 +311,11 @@ impl TDigest {
     ///
     /// # Errors
     ///
-    /// [`CodecError::Truncated`] when `bytes` is shorter than a header,
+    /// [`CodecError::Truncated`] when `bytes` is shorter than a header or than
+    /// the clusters that header counts,
     /// [`CodecError::Tag`] when it holds another structure,
-    /// [`CodecError::Parameters`] when the remaining bytes are not whole
-    /// clusters.
+    /// [`CodecError::Parameters`] when the clusters, the total weight and the
+    /// extremes contradict each other.
     pub fn decode(bytes: &[u8]) -> Result<Self, CodecError> {
         let Some(header) = bytes.get(..HEADER_LEN) else {
             return Err(CodecError::Truncated);
@@ -306,15 +323,19 @@ impl TDigest {
         if header[0] != TAG_TDIGEST {
             return Err(CodecError::Tag);
         }
-        let body = &bytes[HEADER_LEN..];
-        if !body.len().is_multiple_of(CENTROID_LEN) {
-            return Err(CodecError::Parameters);
+        let counted = u32::from_le_bytes([header[3], header[4], header[5], header[6]]);
+        let Ok(clusters) = usize::try_from(counted) else {
+            return Err(CodecError::Truncated);
+        };
+        if (bytes.len() - HEADER_LEN) / CENTROID_LEN < clusters {
+            return Err(CodecError::Truncated);
         }
+        let body = &bytes[HEADER_LEN..HEADER_LEN + clusters * CENTROID_LEN];
 
         let mut digest = Self::new(u16::from_le_bytes([header[1], header[2]]));
-        digest.count = f64::from_le_bytes(read8(&header[3..11]));
-        digest.minimum = f64::from_le_bytes(read8(&header[11..19]));
-        digest.maximum = f64::from_le_bytes(read8(&header[19..27]));
+        digest.count = f64::from_le_bytes(read8(&header[7..15]));
+        digest.minimum = f64::from_le_bytes(read8(&header[15..23]));
+        digest.maximum = f64::from_le_bytes(read8(&header[23..31]));
         let (slots, _) = body.as_chunks::<CENTROID_LEN>();
         digest.centroids = slots
             .iter()
@@ -323,7 +344,35 @@ impl TDigest {
                 weight: f64::from_le_bytes(read8(&slot[8..])),
             })
             .collect();
-        Ok(digest)
+        if digest.is_coherent() {
+            Ok(digest)
+        } else {
+            Err(CodecError::Parameters)
+        }
+    }
+
+    /// Whether the clusters carry the total weight and reach the extremes the
+    /// header claims, as every digest built by adding points does.
+    fn is_coherent(&self) -> bool {
+        if self.centroids.len() > self.capacity() {
+            return false;
+        }
+        let (Some(first), Some(last)) = (self.centroids.first(), self.centroids.last()) else {
+            return self.count == 0.0
+                && self.minimum == f64::INFINITY
+                && self.maximum == f64::NEG_INFINITY;
+        };
+        let weight: f64 = self.centroids.iter().map(|centroid| centroid.weight).sum();
+        self.centroids.iter().all(|centroid| {
+            centroid.mean.is_finite() && centroid.weight.is_finite() && centroid.weight > 0.0
+        }) && self
+            .centroids
+            .is_sorted_by(|left, right| left.mean <= right.mean)
+            && (weight - self.count).abs() <= self.count * WEIGHT_DRIFT
+            && self.minimum.is_finite()
+            && self.maximum.is_finite()
+            && self.minimum <= first.mean
+            && last.mean <= self.maximum
     }
 
     /// Clusters held before compression runs, and never below the one cluster
