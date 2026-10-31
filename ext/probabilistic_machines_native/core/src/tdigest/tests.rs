@@ -197,3 +197,38 @@ fn opposite_sign_extremes_interpolate_to_a_finite_monotonic_answer() {
     assert!(q75.is_finite(), "q75 was {q75}");
     assert!(q75 >= q50, "q75 {q75} fell below q50 {q50}");
 }
+
+// Folding a cluster of one sign into a cluster of the other overflowed the
+// span before weighting it, collapsing a finite population into a NaN cluster
+// that gave NaN quantiles and lost the exact maximum.
+#[test]
+fn collapsing_opposite_sign_extremes_keeps_every_cluster_finite() {
+    let mut digest = TDigest::new(1);
+    for _ in 0..6 {
+        digest.add(-1e308);
+    }
+    for _ in 0..6 {
+        digest.add(1e308);
+    }
+
+    assert!(
+        digest
+            .centroids()
+            .iter()
+            .all(|centroid| centroid.mean.is_finite()),
+        "{:?}",
+        digest.centroids()
+    );
+    assert!(
+        digest
+            .centroids()
+            .is_sorted_by(|left, right| left.mean <= right.mean),
+        "{:?}",
+        digest.centroids()
+    );
+
+    let q50 = digest.quantile(0.5);
+    assert!(q50.is_finite(), "q50 was {q50}");
+    assert!((digest.quantile(0.0) + 1e308).abs() < f64::EPSILON);
+    assert!((digest.quantile(1.0) - 1e308).abs() < f64::EPSILON);
+}

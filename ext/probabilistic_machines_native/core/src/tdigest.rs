@@ -329,10 +329,16 @@ impl TDigest {
 }
 
 /// The weighted mean of two adjacent clusters.
+///
+/// Interpolating at half scale keeps the span of two opposite-sign extremes
+/// inside the finite range, and doubling a mean that lies between two finite
+/// means cannot leave it.
 fn fold(left: Centroid, right: Centroid) -> Centroid {
     let weight = left.weight + right.weight;
+    let low = left.mean * 0.5;
+    let high = right.mean * 0.5;
     Centroid {
-        mean: (right.mean - left.mean).mul_add(right.weight / weight, left.mean),
+        mean: (high - low).mul_add(right.weight / weight, low) * 2.0,
         weight,
     }
 }
