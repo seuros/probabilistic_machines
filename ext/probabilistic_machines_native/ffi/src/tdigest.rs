@@ -11,13 +11,23 @@ use probabilistic_machines::TDigest;
 use crate::data::centroid;
 use crate::{codec_error, optional_kwarg, required_kwarg};
 
+/// Below this the cluster budget is zero, so every point merges into one
+/// centroid and a quantile is meaningless.
+const MIN_COMPRESSION: u16 = 10;
+
 #[magnus::wrap(class = "ProbabilisticMachines::TDigest", free_immediately, size)]
 struct Wrapper(RefCell<TDigest>);
 
 impl Wrapper {
-    fn new(args: &[Value]) -> Result<Self, Error> {
+    fn new(ruby: &Ruby, args: &[Value]) -> Result<Self, Error> {
         let args = scan_args::<(), (), (), (), RHash, ()>(args)?;
         let compression: u16 = required_kwarg(args.keywords, "compression")?;
+        if compression < MIN_COMPRESSION {
+            return Err(Error::new(
+                ruby.exception_arg_error(),
+                format!("compression must be at least {MIN_COMPRESSION}, got {compression}"),
+            ));
+        }
         Ok(Self(RefCell::new(TDigest::new(compression))))
     }
 
