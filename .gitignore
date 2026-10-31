@@ -1,0 +1,10 @@
+/.bundle/
+/coverage/
+/doc/
+/pkg/
+/tmp/
+Gemfile.lock
+
+/ext/**/target
+/ext/**/Cargo.lock
+/target
