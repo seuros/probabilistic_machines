@@ -46,6 +46,13 @@ impl Wrapper {
                 format!("weight must be finite and positive, got {weight}"),
             ));
         }
+        let count = rb_self.0.borrow().count();
+        if !(count + weight).is_finite() {
+            return Err(Error::new(
+                ruby.exception_arg_error(),
+                format!("weight {weight} overflows the total weight {count}"),
+            ));
+        }
         rb_self.0.borrow_mut().add_weighted(value, weight);
         Ok(())
     }
@@ -87,10 +94,20 @@ impl Wrapper {
         Ok(clusters)
     }
 
-    fn merge(rb_self: Obj<Self>, other: &Self) -> Obj<Self> {
+    fn merge(ruby: &Ruby, rb_self: Obj<Self>, other: &Self) -> Result<Obj<Self>, Error> {
         let source = other.0.borrow().clone();
+        let count = rb_self.0.borrow().count();
+        if !(count + source.count()).is_finite() {
+            return Err(Error::new(
+                ruby.exception_arg_error(),
+                format!(
+                    "total weight {} overflows the total weight {count}",
+                    source.count()
+                ),
+            ));
+        }
         rb_self.0.borrow_mut().merge(&source);
-        rb_self
+        Ok(rb_self)
     }
 
     fn dump(ruby: &Ruby, rb_self: &Self) -> RString {

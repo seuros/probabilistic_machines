@@ -205,7 +205,7 @@ impl TDigest {
 
     /// Collapses adjacent clusters up to the weight their quantile allows.
     pub fn compress(&mut self) {
-        let factor = 4.0 * self.count / f64::from(self.compression);
+        let factor = 4.0 / f64::from(self.compression) * self.count;
         let mut merged = Vec::with_capacity(self.centroids.len());
         let mut processed = 0.0;
         let mut open: Option<Centroid> = None;
@@ -219,11 +219,7 @@ impl TDigest {
             let half = combined * 0.5;
             let rank = (processed + half) / self.count;
             if combined <= factor * rank * (1.0 - rank) {
-                let shift = (next.mean - current.mean) * (next.weight / combined);
-                open = Some(Centroid {
-                    mean: current.mean + shift,
-                    weight: combined,
-                });
+                open = Some(fold(current, next));
             } else {
                 processed += current.weight;
                 merged.push(current);
@@ -233,6 +229,19 @@ impl TDigest {
 
         merged.extend(open);
         self.centroids = merged;
+
+        // A cluster holding nearly all the weight pins every later rank at 1.0,
+        // where the scale function above can merge nothing.
+        while self.centroids.len() > self.capacity() {
+            self.centroids = self
+                .centroids
+                .chunks(2)
+                .map(|pair| match pair {
+                    [left, right] => fold(*left, *right),
+                    _ => pair[0],
+                })
+                .collect();
+        }
     }
 
     /// Bytes [`encode`](Self::encode) needs, which grows with the cluster count.
@@ -316,6 +325,15 @@ impl TDigest {
 
     fn capacity(&self) -> usize {
         usize::from(self.compression) * 10
+    }
+}
+
+/// The weighted mean of two adjacent clusters.
+fn fold(left: Centroid, right: Centroid) -> Centroid {
+    let weight = left.weight + right.weight;
+    Centroid {
+        mean: (right.mean - left.mean).mul_add(right.weight / weight, left.mean),
+        weight,
     }
 }
 
