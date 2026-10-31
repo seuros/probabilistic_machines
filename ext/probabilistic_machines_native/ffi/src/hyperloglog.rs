@@ -8,7 +8,7 @@ use magnus::typed_data::Obj;
 use magnus::{Error, RHash, RModule, RString, Ruby, Value, function, method, prelude::*};
 use probabilistic_machines::{CodecError, HyperLogLog};
 
-use crate::{codec_error, mismatch, required_kwarg, unsupported, unsupported_blob};
+use crate::{Whole, codec_error, mismatch, required_kwarg, unsupported, unsupported_blob};
 
 /// Register counts [`Sketch`] is monomorphised for.
 const REGISTERS: [usize; 4] = [1024, 4096, 16384, 65536];
@@ -63,7 +63,7 @@ fn boxed_decode<const N: usize>(ruby: &Ruby, frame: &[u8]) -> Result<Box<HyperLo
 impl Wrapper {
     fn new(ruby: &Ruby, args: &[Value]) -> Result<Self, Error> {
         let args = scan_args::<(), (), (), (), RHash, ()>(args)?;
-        let registers: usize = required_kwarg(args.keywords, "registers")?;
+        let Whole(registers): Whole<usize> = required_kwarg(args.keywords, "registers")?;
         let sketch = match registers {
             1024 => Sketch::M1024(boxed_new::<1024>()),
             4096 => Sketch::M4096(boxed_new::<4096>()),
@@ -96,7 +96,7 @@ impl Wrapper {
         sketch!(&mut *self.0.borrow_mut(), |sketch| sketch.add(&item));
     }
 
-    fn add_hash(&self, hash: u64) {
+    fn add_hash(&self, Whole(hash): Whole<u64>) {
         sketch!(&mut *self.0.borrow_mut(), |sketch| sketch.add_hash(hash));
     }
 

@@ -10,7 +10,9 @@ use magnus::{Error, RArray, RHash, RModule, RString, Ruby, Value, function, meth
 use probabilistic_machines::{CodecError, HeavyHitters, hash64};
 
 use crate::data::hitter;
-use crate::{codec_error, mismatch, optional_kwarg, required_kwarg, unsupported, unsupported_blob};
+use crate::{
+    Whole, codec_error, mismatch, optional_kwarg, required_kwarg, unsupported, unsupported_blob,
+};
 
 /// Counter counts [`Table`] is monomorphised for.
 const COUNTERS: [usize; 3] = [16, 64, 256];
@@ -112,7 +114,7 @@ fn key_table(ruby: &Ruby, mut records: &[u8]) -> Result<HashMap<u64, String>, Er
 impl Wrapper {
     fn new(ruby: &Ruby, args: &[Value]) -> Result<Self, Error> {
         let args = scan_args::<(), (), (), (), RHash, ()>(args)?;
-        let counters: usize = required_kwarg(args.keywords, "k")?;
+        let Whole(counters): Whole<usize> = required_kwarg(args.keywords, "k")?;
         let table = match counters {
             16 => Table::K16(boxed_new::<16>()),
             64 => Table::K64(boxed_new::<64>()),
@@ -160,7 +162,8 @@ impl Wrapper {
     fn add(rb_self: &Self, args: &[Value]) -> Result<(), Error> {
         let args = scan_args::<(String,), (), (), (), RHash, ()>(args)?;
         let (key,) = args.required;
-        let count: u64 = optional_kwarg(args.keywords, "count")?.unwrap_or(1);
+        let count =
+            optional_kwarg::<Whole<u64>>(args.keywords, "count")?.map_or(1, |Whole(count)| count);
         let hash = hash64(key.as_bytes());
         table!(&mut *rb_self.table.borrow_mut(), |table| table
             .add_count(hash, count));
@@ -190,7 +193,7 @@ impl Wrapper {
         rb_self.take(ruby, usize::MAX)
     }
 
-    fn top(ruby: &Ruby, rb_self: &Self, count: usize) -> Result<RArray, Error> {
+    fn top(ruby: &Ruby, rb_self: &Self, Whole(count): Whole<usize>) -> Result<RArray, Error> {
         rb_self.take(ruby, count)
     }
 

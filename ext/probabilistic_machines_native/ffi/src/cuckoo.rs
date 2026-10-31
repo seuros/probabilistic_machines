@@ -7,7 +7,7 @@ use magnus::scan_args::scan_args;
 use magnus::{Error, RHash, RModule, RString, Ruby, Value, function, method, prelude::*};
 use probabilistic_machines::{CodecError, CuckooFilter};
 
-use crate::{codec_error, full, required_kwarg, unsupported, unsupported_blob};
+use crate::{Whole, codec_error, full, required_kwarg, unsupported, unsupported_blob};
 
 /// Bucket counts [`Filter`] is monomorphised for.
 const BUCKETS: [usize; 4] = [1024, 4096, 16384, 65536];
@@ -61,7 +61,7 @@ fn boxed_decode<const N: usize>(ruby: &Ruby, frame: &[u8]) -> Result<Box<CuckooF
 impl Wrapper {
     fn new(ruby: &Ruby, args: &[Value]) -> Result<Self, Error> {
         let args = scan_args::<(), (), (), (), RHash, ()>(args)?;
-        let buckets: usize = required_kwarg(args.keywords, "buckets")?;
+        let Whole(buckets): Whole<usize> = required_kwarg(args.keywords, "buckets")?;
         let filter = match buckets {
             1024 => Filter::B1024(boxed_new::<1024>()),
             4096 => Filter::B4096(boxed_new::<4096>()),

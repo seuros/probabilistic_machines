@@ -8,7 +8,7 @@ use magnus::typed_data::Obj;
 use magnus::{Error, RHash, RModule, RString, Ruby, Value, function, method, prelude::*};
 use probabilistic_machines::{CodecError, CountMinSketch};
 
-use crate::{codec_error, mismatch, optional_kwarg, unsupported};
+use crate::{Whole, codec_error, mismatch, optional_kwarg, unsupported};
 
 /// Row widths [`Sketch`] is monomorphised for.
 ///
@@ -76,9 +76,12 @@ fn boxed_decode<const W: usize, const D: usize>(
 impl Wrapper {
     fn new(ruby: &Ruby, args: &[Value]) -> Result<Self, Error> {
         let args = scan_args::<(), (), (), (), RHash, ()>(args)?;
-        let (width, depth): (usize, usize) =
-            get_kwargs::<_, (usize, usize), (), ()>(args.keywords, &["width", "depth"], &[])?
-                .required;
+        let (Whole(width), Whole(depth)) = get_kwargs::<_, (Whole<usize>, Whole<usize>), (), ()>(
+            args.keywords,
+            &["width", "depth"],
+            &[],
+        )?
+        .required;
         if !DEPTHS.contains(&depth) {
             return Err(unsupported(ruby, "depth", depth, &DEPTHS));
         }
@@ -122,7 +125,8 @@ impl Wrapper {
     fn add(rb_self: &Self, args: &[Value]) -> Result<(), Error> {
         let args = scan_args::<(Bytes,), (), (), (), RHash, ()>(args)?;
         let (item,) = args.required;
-        let count: u32 = optional_kwarg(args.keywords, "count")?.unwrap_or(1);
+        let count =
+            optional_kwarg::<Whole<u32>>(args.keywords, "count")?.map_or(1, |Whole(count)| count);
         sketch!(&mut *rb_self.0.borrow_mut(), |sketch| sketch
             .add_count(&item, count));
         Ok(())
