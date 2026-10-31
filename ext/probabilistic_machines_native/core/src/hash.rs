@@ -59,7 +59,7 @@ pub const fn hash64_with_seed(bytes: &[u8], seed: u64) -> u64 {
         consumed += 1;
     }
 
-    mix64(accumulator ^ mix64(tail ^ consumed))
+    mix64(mix64(accumulator ^ consumed.wrapping_mul(PRIME)) ^ mix64(tail))
 }
 
 pub(crate) const fn u64_low_u16(value: u64) -> u16 {

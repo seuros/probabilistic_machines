@@ -32,7 +32,10 @@ fn small_cardinalities_fall_back_to_linear_counting() {
         fill(&mut sketch, 0..truth);
 
         let error = relative_error(sketch.estimate(), f64::from(truth));
-        assert!(error < 0.02, "{truth}: {error}");
+        assert!(
+            error < HyperLogLog::<1024>::standard_error(),
+            "{truth}: {error}"
+        );
     }
 }
 

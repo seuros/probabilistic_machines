@@ -35,6 +35,10 @@ const POW2_NEG: [f64; 65] = {
 /// let error = (seen.estimate() - 100_000.0).abs() / 100_000.0;
 /// assert!(error < 0.05, "{error}");
 /// ```
+/// Highest rank a register can hold: one leading-zero count per bit of the
+/// hash, plus one.
+const MAX_RANK: u8 = 64;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HyperLogLog<const M: usize> {
     registers: [u8; M],
@@ -190,6 +194,13 @@ impl<const M: usize> HyperLogLog<M> {
         }
         if frame[1] != u32_low_u8(Self::PRECISION) {
             return Err(CodecError::Parameters);
+        }
+        let mut index = 0;
+        while index < M {
+            if frame[2 + index] > MAX_RANK {
+                return Err(CodecError::Parameters);
+            }
+            index += 1;
         }
         self.registers.copy_from_slice(&frame[2..]);
         Ok(())

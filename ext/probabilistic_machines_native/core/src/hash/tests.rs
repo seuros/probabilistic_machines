@@ -72,3 +72,13 @@ fn extremes(buckets: &[u32]) -> (u32, u32) {
             (smallest.min(count), largest.max(count))
         })
 }
+
+// A zero-padded tail XORed with the length let "a" and "b\0" cancel to the
+// same value.
+#[test]
+fn a_short_key_does_not_collide_with_a_longer_zero_padded_one() {
+    assert_ne!(hash64(b"a"), hash64(b"b\0"));
+    assert_ne!(hash64(b"b"), hash64(b"c\0"));
+    assert_ne!(hash64(b"a"), hash64(b"c\0\0"));
+    assert_ne!(hash64(b""), hash64(b"\0"));
+}
