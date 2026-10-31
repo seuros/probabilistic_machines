@@ -1,0 +1,176 @@
+# Sketches that answer a counting question in memory fixed at construction
+# time. Every class here is defined by the native extension.
+module ProbabilisticMachines
+  VERSION: String
+
+  class Error < StandardError
+  end
+
+  # Raised when a cuckoo filter has nowhere left to put a fingerprint.
+  class Full < Error
+  end
+
+  # A tracked key and its counter. The true count lies in
+  # `count - overestimate` through `count`.
+  class Hitter < ::Data
+    attr_reader key: String
+    attr_reader count: Integer
+    attr_reader overestimate: Integer
+  end
+
+  # One cluster of a digest: the mean of the values that collapsed into it.
+  class Centroid < ::Data
+    attr_reader mean: Float
+    attr_reader weight: Float
+  end
+
+  # Distinct counts in a fixed register array.
+  class HyperLogLog
+    # `registers` is 1024, 4096, 16384 or 65536.
+    def self.new: (registers: Integer) -> instance
+
+    def self.load: (String blob) -> instance
+
+    def registers: () -> Integer
+    def add: (String item) -> nil
+
+    # For streams that ship 64-bit hashes instead of keys.
+    def add_hash: (Integer hash) -> nil
+
+    def estimate: () -> Float
+
+    # Relative standard error of the estimate, `1.04 / sqrt(registers)`.
+    def standard_error: () -> Float
+
+    def empty?: () -> bool
+
+    # Unions `other` in. Raises `ArgumentError` on a different register count.
+    def merge: (HyperLogLog other) -> self
+
+    def dump: () -> String
+    def inspect: () -> String
+  end
+
+  # How often each item was seen, in `width * depth` counters.
+  class CountMinSketch
+    # `width` is 1024 or 4096; `depth` is 4 or 8.
+    def self.new: (width: Integer, depth: Integer) -> instance
+
+    def self.load: (String blob) -> instance
+
+    def width: () -> Integer
+    def depth: () -> Integer
+    def add: (String item, ?count: Integer) -> nil
+
+    # Never below the true count, and over it by at most
+    # `e * total / width` with probability `1 - e ** -depth`.
+    def count: (String item) -> Integer
+
+    # Sum of every count added.
+    def total: () -> Integer
+
+    # Sums `other` in. Raises `ArgumentError` on a different shape.
+    def merge: (CountMinSketch other) -> self
+
+    def dump: () -> String
+    def inspect: () -> String
+  end
+
+  # Quantiles of a stream, in clusters instead of samples.
+  class TDigest
+    def self.new: (compression: Integer) -> instance
+
+    def self.load: (String blob) -> instance
+
+    def compression: () -> Integer
+    def add: (Float value, ?weight: Float) -> nil
+
+    # Value at quantile `q`, `Float::NAN` when empty.
+    def quantile: (Float q) -> Float
+
+    # Fraction of the stream at or below `value`, `Float::NAN` when empty.
+    def cdf: (Float value) -> Float
+
+    # Total weight added.
+    def count: () -> Float
+
+    # Smallest value added, `Float::INFINITY` when empty.
+    def minimum: () -> Float
+
+    # Largest value added, `-Float::INFINITY` when empty.
+    def maximum: () -> Float
+
+    # Clusters currently held.
+    def size: () -> Integer
+
+    def empty?: () -> bool
+    def centroids: () -> Array[Centroid]
+    def merge: (TDigest other) -> self
+    def dump: () -> String
+    def inspect: () -> String
+  end
+
+  # Membership that can forget, in `buckets * 4` fingerprints.
+  class CuckooFilter
+    # `buckets` is 1024, 4096, 16384 or 65536.
+    def self.new: (buckets: Integer) -> instance
+
+    def self.load: (String blob) -> instance
+
+    def buckets: () -> Integer
+
+    # Fingerprint slots in the table, `buckets * 4`.
+    def capacity: () -> Integer
+
+    # Raises `Full` when the item has nowhere to go.
+    def insert: (String item) -> bool
+
+    # Never false for an item that was inserted; true for one that was not
+    # with probability about 3%.
+    def include?: (String item) -> bool
+
+    alias contains? include?
+
+    # Only for items that were inserted: removing an item that merely collides
+    # with one takes the other item's fingerprint with it.
+    def remove: (String item) -> bool
+
+    def size: () -> Integer
+    def empty?: () -> bool
+    def dump: () -> String
+    def inspect: () -> String
+  end
+
+  # Which keys dominate a stream, in `k` counters instead of one per key.
+  class HeavyHitters
+    # `k` is 16, 64 or 256.
+    def self.new: (k: Integer) -> instance
+
+    def k: () -> Integer
+
+    # Keys are UTF-8 strings, so `top` and `ranked` can hand them back.
+    def add: (String key, ?count: Integer) -> nil
+
+    # Upper bound on how often `key` occurred, 0 when it is not tracked.
+    def count: (String key) -> Integer
+
+    # Observations fed in.
+    def observed: () -> Integer
+
+    # Keys currently tracked, at most `k`.
+    def size: () -> Integer
+
+    def empty?: () -> bool
+
+    # The `n` most frequent tracked keys, most frequent first.
+    def top: (Integer n) -> Array[Hitter]
+
+    # Every tracked key, most frequent first.
+    def ranked: () -> Array[Hitter]
+
+    # Folds `other` in. Raises `ArgumentError` on a different `k`.
+    def merge: (HeavyHitters other) -> self
+
+    def inspect: () -> String
+  end
+end

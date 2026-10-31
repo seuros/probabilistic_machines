@@ -8,3 +8,13 @@ Gemfile.lock
 /ext/**/target
 /ext/**/Cargo.lock
 /target
+
+*.gem
+
+/lib/probabilistic_machines_native/
+/ext/**/*.bundle
+/ext/**/*.so
+/ext/**/*.dSYM/
+/ext/**/.sitearchdir.time
+/ext/**/Makefile
+/ext/**/mkmf.log

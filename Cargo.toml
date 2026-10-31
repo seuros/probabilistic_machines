@@ -1,5 +1,5 @@
 [workspace]
-members = ["ext/probabilistic_machines_native/core"]
+members = ["ext/probabilistic_machines_native/core", "ext/probabilistic_machines_native/ffi"]
 resolver = "3"
 
 [workspace.package]

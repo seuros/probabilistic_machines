@@ -1,0 +1,20 @@
+[package]
+name = "probabilistic_machines_native"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+authors = ["Abdelkader Boudih <oss@seuros.com>"]
+license = "MIT"
+description = "Ruby bindings for the probabilistic-machines sketches"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[lints]
+workspace = true
+
+[dependencies]
+probabilistic-machines = { workspace = true, features = ["std"] }
+magnus = { version = "0.9", features = ["bytes"] }
+bytes = "1"
