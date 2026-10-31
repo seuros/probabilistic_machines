@@ -111,11 +111,17 @@ impl TDigest {
         self.centroids.is_empty()
     }
 
+    /// Adds one observation of `value`, under the same precondition as
+    /// [`add_weighted`](Self::add_weighted).
     pub fn add(&mut self, value: f64) {
         self.add_weighted(value, 1.0);
     }
 
     /// Adds a value standing for `weight` observations.
+    ///
+    /// `value` must be finite, and `weight` finite and positive: the quantiles
+    /// of a stream carrying anything else mean nothing, and the clusters it
+    /// leaves are not ones [`decode`](Self::decode) reads back.
     pub fn add_weighted(&mut self, value: f64, weight: f64) {
         let at = self
             .centroids
