@@ -6,7 +6,8 @@ use crate::{CodecError, TAG_COUNTMIN, read8};
 /// Counts how often each item appeared, in `W * D` counters.
 ///
 /// `W` is the row width, a power of two up to 65536; `D` is the number of rows.
-/// An estimate is never below the true count, and overshoots it by more than
+/// An estimate is never below the true count while [`saturated`](Self::saturated)
+/// is false, and overshoots it by more than
 /// `e * total / W` with probability at most `e^-D`, where `total` is the sum of
 /// every count added. 2048 columns over 5 rows hold the overshoot under 0.14%
 /// of the total with probability 0.993.
@@ -25,6 +26,7 @@ use crate::{CodecError, TAG_COUNTMIN, read8};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CountMinSketch<const W: usize, const D: usize> {
     rows: [[u32; W]; D],
+    saturated: bool,
     total: u64,
 }
 
@@ -46,6 +48,7 @@ impl<const W: usize, const D: usize> CountMinSketch<W, D> {
         Self {
             rows: [[0; W]; D],
             total: 0,
+            saturated: false,
         }
     }
 
@@ -53,6 +56,13 @@ impl<const W: usize, const D: usize> CountMinSketch<W, D> {
     #[must_use]
     pub const fn total(&self) -> u64 {
         self.total
+    }
+
+    /// True once a counter has hit [`u32::MAX`], after which an estimate can
+    /// fall below the true count.
+    #[must_use]
+    pub const fn saturated(&self) -> bool {
+        self.saturated
     }
 
     pub fn add(&mut self, item: &[u8]) {
@@ -69,7 +79,9 @@ impl<const W: usize, const D: usize> CountMinSketch<W, D> {
         for row in &mut self.rows {
             cursor = mix64(cursor);
             let column = usize::from(u64_low_u16(cursor)) & Self::COLUMN_MASK;
-            row[column] = row[column].saturating_add(count);
+            let (sum, overflowed) = row[column].overflowing_add(count);
+            self.saturated |= overflowed;
+            row[column] = if overflowed { u32::MAX } else { sum };
         }
         self.total = self.total.saturating_add(u64::from(count));
     }
@@ -98,11 +110,15 @@ impl<const W: usize, const D: usize> CountMinSketch<W, D> {
     /// Adds another sketch's counters to this one, which is exact for sketches
     /// of the same shape: the result equals one sketch fed both streams.
     pub fn merge(&mut self, other: &Self) {
+        let mut saturated = self.saturated || other.saturated;
         for (mine, theirs) in self.rows.iter_mut().zip(&other.rows) {
             for (counter, addend) in mine.iter_mut().zip(theirs) {
-                *counter = counter.saturating_add(*addend);
+                let (sum, overflowed) = counter.overflowing_add(*addend);
+                saturated |= overflowed;
+                *counter = if overflowed { u32::MAX } else { sum };
             }
         }
+        self.saturated = saturated;
         self.total = self.total.saturating_add(other.total);
     }
 

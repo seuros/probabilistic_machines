@@ -30,10 +30,22 @@ impl Wrapper {
         self.0.borrow().compression()
     }
 
-    fn add(rb_self: &Self, args: &[Value]) -> Result<(), Error> {
+    fn add(ruby: &Ruby, rb_self: &Self, args: &[Value]) -> Result<(), Error> {
         let args = scan_args::<(f64,), (), (), (), RHash, ()>(args)?;
         let (value,) = args.required;
         let weight: f64 = optional_kwarg(args.keywords, "weight")?.unwrap_or(1.0);
+        if !value.is_finite() {
+            return Err(Error::new(
+                ruby.exception_arg_error(),
+                format!("value must be finite, got {value}"),
+            ));
+        }
+        if !weight.is_finite() || weight <= 0.0 {
+            return Err(Error::new(
+                ruby.exception_arg_error(),
+                format!("weight must be finite and positive, got {weight}"),
+            ));
+        }
         rb_self.0.borrow_mut().add_weighted(value, weight);
         Ok(())
     }

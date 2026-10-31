@@ -181,3 +181,19 @@ fn frames_reject_foreign_bytes() {
     wrong[0] = 0x00;
     assert_eq!(TDigest::decode(&wrong), Err(CodecError::Tag));
 }
+
+// Subtracting opposite-sign extremes overflowed before the multiply, so a
+// finite population produced an infinite quantile and q75 fell below q50.
+#[test]
+fn opposite_sign_extremes_interpolate_to_a_finite_monotonic_answer() {
+    let mut digest = TDigest::new(100);
+    digest.add(-1e308);
+    digest.add(1e308);
+
+    let q50 = digest.quantile(0.5);
+    let q75 = digest.quantile(0.75);
+
+    assert!(q50.is_finite(), "q50 was {q50}");
+    assert!(q75.is_finite(), "q75 was {q75}");
+    assert!(q75 >= q50, "q75 {q75} fell below q50 {q50}");
+}

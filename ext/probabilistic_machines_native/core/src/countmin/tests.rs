@@ -129,3 +129,17 @@ fn a_single_row_still_counts() {
     sketch.add_count(b"only", 9);
     assert!(sketch.estimate(b"only") >= 9);
 }
+
+// Saturating silently returned an estimate below the true count, so the
+// never-underestimate guarantee needs a flag that says when it stops holding.
+#[test]
+fn saturation_is_reported_rather_than_silent() {
+    let mut sketch = CountMinSketch::<32, 3>::new();
+    sketch.add_count(b"x", u32::MAX);
+    assert!(!sketch.saturated());
+
+    sketch.add(b"x");
+
+    assert!(sketch.saturated());
+    assert_eq!(sketch.estimate(b"x"), u32::MAX);
+}

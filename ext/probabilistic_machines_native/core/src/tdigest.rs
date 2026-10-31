@@ -324,8 +324,7 @@ fn lerp(at: f64, low_x: f64, low_y: f64, high_x: f64, high_y: f64) -> f64 {
         return high_y;
     }
     let fraction = (at - low_x) / (high_x - low_x);
-    let rise = (high_y - low_y) * fraction;
-    low_y + rise
+    low_y.mul_add(1.0 - fraction, high_y * fraction)
 }
 
 #[cfg(test)]
