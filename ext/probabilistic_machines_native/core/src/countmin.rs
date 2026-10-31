@@ -41,7 +41,7 @@ impl<const W: usize, const D: usize> CountMinSketch<W, D> {
     };
 
     /// Length of the [`encode`](Self::encode) frame.
-    pub const ENCODED_LEN: usize = 11 + W * D * 4;
+    pub const ENCODED_LEN: usize = 12 + W * D * 4;
 
     #[must_use]
     pub const fn new() -> Self {
@@ -151,9 +151,10 @@ impl<const W: usize, const D: usize> CountMinSketch<W, D> {
         frame[1] = u32_low_u8(W.trailing_zeros());
         frame[2] = usize_low_u8(D);
         frame[3..11].copy_from_slice(&self.total.to_le_bytes());
+        frame[11] = u8::from(self.saturated);
 
         let counters = self.rows.iter().flatten();
-        let (slots, _) = frame[11..].as_chunks_mut::<4>();
+        let (slots, _) = frame[12..].as_chunks_mut::<4>();
         for (slot, counter) in slots.iter_mut().zip(counters) {
             *slot = counter.to_le_bytes();
         }
@@ -192,8 +193,10 @@ impl<const W: usize, const D: usize> CountMinSketch<W, D> {
         }
 
         self.total = u64::from_le_bytes(read8(&frame[3..11]));
+        self.saturated = frame[11] != 0;
+
         let counters = self.rows.iter_mut().flatten();
-        let (slots, _) = frame[11..].as_chunks::<4>();
+        let (slots, _) = frame[12..].as_chunks::<4>();
         for (slot, counter) in slots.iter().zip(counters) {
             *counter = u32::from_le_bytes(*slot);
         }

@@ -93,7 +93,7 @@ fn frames_round_trip_and_reject_foreign_bytes() {
     }
 
     let mut frame = [0_u8; CountMinSketch::<32, 3>::ENCODED_LEN];
-    assert_eq!(sketch.encode(&mut frame), Ok(11 + 32 * 3 * 4));
+    assert_eq!(sketch.encode(&mut frame), Ok(12 + 32 * 3 * 4));
     #[cfg(feature = "alloc")]
     assert_eq!(&*sketch.encoded(), &frame[..]);
     assert_eq!(CountMinSketch::<32, 3>::decode(&frame), Ok(sketch.clone()));
@@ -142,4 +142,17 @@ fn saturation_is_reported_rather_than_silent() {
 
     assert!(sketch.saturated());
     assert_eq!(sketch.estimate(b"x"), u32::MAX);
+}
+
+#[test]
+fn saturation_survives_a_round_trip() {
+    let mut sketch = CountMinSketch::<32, 3>::new();
+    sketch.add_count(b"x", u32::MAX);
+    sketch.add(b"x");
+    assert!(sketch.saturated());
+
+    let decoded = CountMinSketch::<32, 3>::decode(&sketch.encoded()).unwrap_or_default();
+
+    assert!(decoded.saturated());
+    assert!(!CountMinSketch::<32, 3>::new().saturated());
 }

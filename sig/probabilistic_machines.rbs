@@ -68,6 +68,7 @@ module ProbabilisticMachines
 
     # Sum of every count added.
     def total: () -> Integer
+    def saturated?: () -> bool
 
     # Sums `other` in. Raises `ArgumentError` on a different shape.
     def merge: (CountMinSketch other) -> self

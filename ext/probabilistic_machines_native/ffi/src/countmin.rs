@@ -132,6 +132,10 @@ impl Wrapper {
         sketch!(&*self.0.borrow(), |sketch| sketch.estimate(&item))
     }
 
+    fn saturated(&self) -> bool {
+        sketch!(&*self.0.borrow(), |sketch| sketch.saturated())
+    }
+
     fn total(&self) -> u64 {
         sketch!(&*self.0.borrow(), |sketch| sketch.total())
     }
@@ -172,6 +176,7 @@ pub fn define(ruby: &Ruby, module: RModule) -> Result<(), Error> {
     class.define_method("add", method!(Wrapper::add, -1))?;
     class.define_method("count", method!(Wrapper::count, 1))?;
     class.define_method("total", method!(Wrapper::total, 0))?;
+    class.define_method("saturated?", method!(Wrapper::saturated, 0))?;
     class.define_method("merge", method!(Wrapper::merge, 1))?;
     class.define_method("dump", method!(Wrapper::dump, 0))?;
     class.define_method("inspect", method!(Wrapper::inspect, 0))?;

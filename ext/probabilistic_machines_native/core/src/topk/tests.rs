@@ -157,6 +157,6 @@ fn an_empty_table_round_trips() {
 fn a_frame_from_another_structure_is_refused() {
     let counters = crate::CountMinSketch::<4, 2>::new();
     let mut frame = [0_u8; HeavyHitters::<u64, 8>::ENCODED_LEN];
-    assert_eq!(counters.encode(&mut frame), Ok(11 + 4 * 2 * 4));
+    assert_eq!(counters.encode(&mut frame), Ok(12 + 4 * 2 * 4));
     assert_eq!(HeavyHitters::<u64, 8>::decode(&frame), Err(CodecError::Tag));
 }
