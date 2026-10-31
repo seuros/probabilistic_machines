@@ -38,5 +38,5 @@ Gem::Specification.new do |spec|
   spec.require_paths = ['lib']
   spec.extensions = ['ext/probabilistic_machines_native/extconf.rb']
 
-  spec.add_dependency 'rb_sys', '~> 0.9'
+  spec.add_development_dependency 'rb_sys', '~> 0.9'
 end

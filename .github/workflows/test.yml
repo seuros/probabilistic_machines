@@ -2,25 +2,32 @@ name: Test
 
 on:
   push:
-    branches: [ main ]
+    branches: [ master ]
   pull_request:
-    branches: [ main ]
-
-env:
-  CORE: ext/probabilistic_machines_native/core
-  FFI: ext/probabilistic_machines_native/ffi
+    branches: [ master ]
 
 jobs:
-  test-rust:
+  crates:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - name: Set up Rust (mise)
-        uses: jdx/mise-action@v5
+      - uses: jdx/mise-action@v5
         with:
           install_args: rust
+
+      - name: Locate the crates
+        id: crates
+        run: |
+          core=''
+          ffi=''
+          for dir in ext/*/core; do [ -d "$dir" ] && core="$dir"; done
+          for dir in ext/*/ffi; do [ -d "$dir" ] && ffi="$dir"; done
+          echo "core=$core" >> "$GITHUB_OUTPUT"
+          echo "ffi=$ffi" >> "$GITHUB_OUTPUT"
+
       - name: Lint and test every feature combination
-        working-directory: ${{ env.CORE }}
+        if: steps.crates.outputs.core != ''
+        working-directory: ${{ steps.crates.outputs.core }}
         run: |
           for features in "" alloc std; do
             echo "::group::features: ${features:-none}"
@@ -28,20 +35,42 @@ jobs:
             cargo test --no-default-features --features "$features" --lib
             echo "::endgroup::"
           done
+
       - name: Run doc tests
-        working-directory: ${{ env.CORE }}
+        if: steps.crates.outputs.core != ''
+        working-directory: ${{ steps.crates.outputs.core }}
         run: cargo test --all-features --doc
 
-  test-no-std:
+      - name: Lint the binding crate
+        if: steps.crates.outputs.ffi != ''
+        run: cargo clippy --manifest-path ${{ steps.crates.outputs.ffi }}/Cargo.toml --all-targets -- -D warnings
+
+      - name: Check formatting
+        if: steps.crates.outputs.core != ''
+        run: |
+          cargo fmt --check --manifest-path ${{ steps.crates.outputs.core }}/Cargo.toml
+          if [ -n "${{ steps.crates.outputs.ffi }}" ]; then
+            cargo fmt --check --manifest-path ${{ steps.crates.outputs.ffi }}/Cargo.toml
+          fi
+
+  bare-metal:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - name: Set up Rust (mise)
-        uses: jdx/mise-action@v5
+      - uses: jdx/mise-action@v5
         with:
           install_args: rust
+
+      - name: Locate the core crate
+        id: crates
+        run: |
+          core=''
+          for dir in ext/*/core; do [ -d "$dir" ] && core="$dir"; done
+          echo "core=$core" >> "$GITHUB_OUTPUT"
+
       - name: Build and lint on bare metal
-        working-directory: ${{ env.CORE }}
+        if: steps.crates.outputs.core != ''
+        working-directory: ${{ steps.crates.outputs.core }}
         run: |
           for features in "" alloc; do
             echo "::group::thumbv7em features: ${features:-none}"
@@ -50,32 +79,30 @@ jobs:
             echo "::endgroup::"
           done
 
-  # The extension is required, so there is no engine matrix: CRuby only.
-  test-ruby:
+  ruby:
     runs-on: ubuntu-latest
     env:
       BUNDLE_PATH: vendor/bundle
     steps:
       - uses: actions/checkout@v7
-      - name: Set up toolchain (mise)
-        uses: jdx/mise-action@v5
+      - uses: jdx/mise-action@v5
         with:
           mise_toml: |
             [tools]
             ruby = "4.0"
             rust = { version = "1.99", components = "clippy,rustfmt" }
+
       - name: Cache gems
         uses: actions/cache@v6
         with:
           path: vendor/bundle
           key: ${{ runner.os }}-gems-${{ hashFiles('Gemfile', '*.gemspec') }}
+
       - name: Install gems
         run: bundle install --jobs 4
-      - name: Lint the binding crate
-        run: cargo clippy --manifest-path ${{ env.FFI }}/Cargo.toml --all-targets -- -D warnings
-      - name: Compile the extension
-        run: bundle exec rake compile
+
       - name: Run tests
         run: bundle exec rake test
+
       - name: Validate signatures
         run: bundle exec rbs -I sig validate
