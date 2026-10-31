@@ -1,4 +1,4 @@
-use super::HeavyHitters;
+use super::{HEADER_LEN, HeavyHitters, OVERESTIMATE_AT, RECORD_LEN};
 use crate::CodecError;
 
 #[test]
@@ -182,6 +182,87 @@ fn frames_round_trip_and_reject_foreign_bytes() {
         HeavyHitters::<u64, 8>::decode(&overfull),
         Err(CodecError::Parameters)
     );
+}
+
+/// Two tables that traded floors until one counter passed the observations it
+/// counts, which only merging produces.
+fn stacked_floors() -> HeavyHitters<u64, 2> {
+    let mut left = HeavyHitters::<u64, 2>::new();
+    let mut right = HeavyHitters::<u64, 2>::new();
+    right.add(0);
+    right.add(2);
+    left.add(1);
+    left.merge(&right);
+    right.merge(&left);
+    right.add(0);
+    left.merge(&right);
+    left
+}
+
+/// A table whose weakest counter went to a key the merged-in table tracked
+/// without ever seeing it, so the counter is all floor and the interval it
+/// claims starts at nothing.
+fn pure_floor() -> HeavyHitters<u64, 2> {
+    let mut source = HeavyHitters::<u64, 2>::new();
+    source.add_count(7, 0);
+
+    let mut table = HeavyHitters::<u64, 2>::new();
+    table.add_count(5, 10);
+    table.add_count(6, 20);
+    table.merge(&source);
+    table
+}
+
+// A record's count and its overestimate were read with no bound from the
+// observation count, so an edited frame described occurrences that never
+// happened and merging carried them into a healthy table.
+#[test]
+fn records_no_stream_could_leave_are_refused() {
+    let mut table = HeavyHitters::<u64, 2>::new();
+    table.add_count(1, 10);
+    table.add_count(2, 10);
+
+    let mut frame = [0_u8; HeavyHitters::<u64, 2>::ENCODED_LEN];
+    assert_eq!(table.encode(&mut frame), Ok(frame.len()));
+
+    let mut unobserved = frame;
+    unobserved[3] = 0;
+    assert_eq!(
+        HeavyHitters::<u64, 2>::decode(&unobserved),
+        Err(CodecError::Parameters)
+    );
+
+    let mut inverted = frame;
+    inverted[HEADER_LEN + OVERESTIMATE_AT] = u8::MAX;
+    assert_eq!(
+        HeavyHitters::<u64, 2>::decode(&inverted),
+        Err(CodecError::Parameters)
+    );
+
+    let mut twice = frame;
+    twice[HEADER_LEN + RECORD_LEN] = frame[HEADER_LEN];
+    assert_eq!(
+        HeavyHitters::<u64, 2>::decode(&twice),
+        Err(CodecError::Parameters)
+    );
+
+    let stacked = stacked_floors();
+    assert!(
+        stacked
+            .hitters()
+            .any(|hitter| hitter.count > stacked.observed())
+    );
+    assert_eq!(stacked.encode(&mut frame), Ok(frame.len()));
+    assert_eq!(HeavyHitters::<u64, 2>::decode(&frame), Ok(stacked));
+
+    let inherited = pure_floor();
+    assert!(
+        inherited
+            .hitters()
+            .any(|hitter| hitter.count > 0 && hitter.overestimate == hitter.count)
+    );
+    assert_eq!(inherited.encode(&mut frame), Ok(frame.len()));
+    assert_eq!(HeavyHitters::<u64, 2>::decode(&frame), Ok(inherited));
 }
 
 #[cfg(feature = "alloc")]

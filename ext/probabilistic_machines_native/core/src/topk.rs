@@ -5,6 +5,9 @@ use crate::{CodecError, TAG_TOPK, read8};
 
 const HEADER_LEN: usize = 13;
 const RECORD_LEN: usize = 24;
+/// Where a record's count and overestimate begin, after its key.
+const COUNT_AT: usize = 8;
+const OVERESTIMATE_AT: usize = 16;
 
 /// A tracked key, its counter, and how much of that counter it may have
 /// inherited from keys evicted before it or from a merged-in stream that
@@ -213,9 +216,9 @@ impl<const K: usize> HeavyHitters<u64, K> {
 
         let (slots, _) = frame[HEADER_LEN..].as_chunks_mut::<RECORD_LEN>();
         for (slot, hitter) in slots.iter_mut().zip(self.hitters()) {
-            slot[..8].copy_from_slice(&hitter.key.to_le_bytes());
-            slot[8..16].copy_from_slice(&hitter.count.to_le_bytes());
-            slot[16..].copy_from_slice(&hitter.overestimate.to_le_bytes());
+            slot[..COUNT_AT].copy_from_slice(&hitter.key.to_le_bytes());
+            slot[COUNT_AT..OVERESTIMATE_AT].copy_from_slice(&hitter.count.to_le_bytes());
+            slot[OVERESTIMATE_AT..].copy_from_slice(&hitter.overestimate.to_le_bytes());
         }
     }
 
@@ -225,8 +228,8 @@ impl<const K: usize> HeavyHitters<u64, K> {
     ///
     /// [`CodecError::Truncated`] when `bytes` is too short, [`CodecError::Tag`]
     /// when it holds another structure, [`CodecError::Parameters`] when it was
-    /// written with a different counter count or claims more tracked keys than
-    /// `K`.
+    /// written with a different counter count, claims more tracked keys than
+    /// `K`, or holds records no stream could have left.
     pub fn decode(bytes: &[u8]) -> Result<Self, CodecError> {
         let mut table = Self::new();
         table.decode_into(bytes)?;
@@ -256,18 +259,49 @@ impl<const K: usize> HeavyHitters<u64, K> {
             return Err(CodecError::Parameters);
         }
 
-        self.observed = u64::from_le_bytes(read8(&frame[3..11]));
+        let observed = u64::from_le_bytes(read8(&frame[3..11]));
         let (slots, _) = frame[HEADER_LEN..].as_chunks::<RECORD_LEN>();
-        for (slot, record) in self.slots.iter_mut().zip(&slots[..tracked]) {
-            *slot = Some(Hitter {
-                key: u64::from_le_bytes(read8(&record[..8])),
-                count: u64::from_le_bytes(read8(&record[8..16])),
-                overestimate: u64::from_le_bytes(read8(&record[16..])),
-            });
+        let records = &slots[..tracked];
+        if !records_are_coherent(records, observed) {
+            return Err(CodecError::Parameters);
+        }
+
+        self.observed = observed;
+        for (slot, record) in self.slots.iter_mut().zip(records) {
+            *slot = Some(hitter(record));
         }
         self.slots[tracked..].fill(None);
         Ok(())
     }
+}
+
+/// A record as the hitter it stands for.
+fn hitter(record: &[u8; RECORD_LEN]) -> Hitter<u64> {
+    Hitter {
+        key: u64::from_le_bytes(read8(&record[..COUNT_AT])),
+        count: u64::from_le_bytes(read8(&record[COUNT_AT..OVERESTIMATE_AT])),
+        overestimate: u64::from_le_bytes(read8(&record[OVERESTIMATE_AT..])),
+    }
+}
+
+/// Whether the records are ones Space-Saving could have tracked: a counter
+/// stands for at least `count - overestimate` occurrences, which cannot outrun
+/// the observations they came from, an interval runs upwards, and a key holds
+/// one counter.
+///
+/// The counter itself may pass the observation count: a merge lifts a key the
+/// other table evicted to that table's eviction floor and widens the
+/// overestimate with it, so the two tables' floors can stack above the two
+/// streams' length while the occurrences the interval claims stay inside it.
+fn records_are_coherent(records: &[[u8; RECORD_LEN]], observed: u64) -> bool {
+    records.iter().enumerate().all(|(index, record)| {
+        let tracked = hitter(record);
+        tracked.overestimate <= tracked.count
+            && tracked.count - tracked.overestimate <= observed
+            && records[..index]
+                .iter()
+                .all(|earlier| hitter(earlier).key != tracked.key)
+    })
 }
 
 impl<T: Copy + Eq, const K: usize> Default for HeavyHitters<T, K> {
