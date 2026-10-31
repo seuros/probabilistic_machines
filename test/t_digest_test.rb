@@ -88,5 +88,17 @@ module ProbabilisticMachines
       assert_equal 2_000.0, digest.count
       assert_in_delta 500, digest.quantile(0.5), 1_000 / 100.0
     end
+
+    def test_a_compression_that_holds_no_quantile_is_rejected
+      assert_raises(ArgumentError) { TDigest.new(compression: 0) }
+    end
+
+    def test_a_total_weight_that_cannot_stay_finite_is_rejected
+      digest = TDigest.new(compression: 100)
+      digest.add(1.0, weight: 1e308)
+
+      assert_raises(ArgumentError) { digest.add(2.0, weight: 1e308) }
+      assert_predicate digest.count, :finite?
+    end
   end
 end
