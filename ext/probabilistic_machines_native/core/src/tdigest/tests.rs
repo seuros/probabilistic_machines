@@ -210,6 +210,39 @@ fn a_frame_that_lost_whole_clusters_is_not_a_digest() {
     assert_eq!(TDigest::decode(&drifted).map(|digest| digest.len()), Ok(3));
 }
 
+// The drift tolerance scaled with the stored total, so an infinite total sat
+// within infinity of the clusters' finite sum and passed: a frame the add path
+// refuses to produce loaded into a digest counting infinity and answering NaN.
+#[test]
+fn a_frame_claiming_an_impossible_total_is_not_a_digest() {
+    let digest = uniform(3, 10);
+    let frame = digest.encoded();
+
+    for total in [f64::INFINITY, f64::NEG_INFINITY, f64::NAN, 0.0, -3.0] {
+        let mut tampered = frame.clone();
+        tampered[7..15].copy_from_slice(&total.to_le_bytes());
+        assert_eq!(
+            TDigest::decode(&tampered),
+            Err(CodecError::Parameters),
+            "total {total}"
+        );
+    }
+
+    let mut overflowing = frame.clone();
+    overflowing[7..15].copy_from_slice(&f64::MAX.to_le_bytes());
+    for slot in 0..digest.len() {
+        let at = HEADER_LEN + slot * CENTROID_LEN + 8;
+        overflowing[at..at + 8].copy_from_slice(&f64::MAX.to_le_bytes());
+    }
+    assert_eq!(TDigest::decode(&overflowing), Err(CodecError::Parameters));
+
+    assert_eq!(TDigest::decode(&frame), Ok(digest));
+    assert_eq!(
+        TDigest::decode(&TDigest::new(10).encoded()),
+        Ok(TDigest::new(10))
+    );
+}
+
 // Subtracting opposite-sign extremes overflowed before the multiply, so a
 // finite population produced an infinite quantile and q75 fell below q50.
 #[test]

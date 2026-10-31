@@ -368,12 +368,17 @@ impl TDigest {
                 && self.minimum == f64::INFINITY
                 && self.maximum == f64::NEG_INFINITY;
         };
+        if !self.count.is_finite() || self.count <= 0.0 {
+            return false;
+        }
         let weight: f64 = self.centroids.iter().map(|centroid| centroid.weight).sum();
-        self.centroids.iter().all(|centroid| {
-            centroid.mean.is_finite() && centroid.weight.is_finite() && centroid.weight > 0.0
-        }) && self
-            .centroids
-            .is_sorted_by(|left, right| left.mean <= right.mean)
+        weight.is_finite()
+            && self.centroids.iter().all(|centroid| {
+                centroid.mean.is_finite() && centroid.weight.is_finite() && centroid.weight > 0.0
+            })
+            && self
+                .centroids
+                .is_sorted_by(|left, right| left.mean <= right.mean)
             && (weight - self.count).abs() <= self.count * WEIGHT_DRIFT
             && self.minimum.is_finite()
             && self.maximum.is_finite()
