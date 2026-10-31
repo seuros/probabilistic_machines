@@ -7,6 +7,9 @@ use crate::{CodecError, TAG_TDIGEST, read8};
 const HEADER_LEN: usize = 27;
 const CENTROID_LEN: usize = 16;
 
+/// Clusters the digest may hold per unit of compression.
+const CLUSTERS_PER_COMPRESSION: usize = 10;
+
 /// A weighted point: the mean of the values that collapsed into it.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Centroid {
@@ -323,8 +326,10 @@ impl TDigest {
         Ok(digest)
     }
 
+    /// Clusters held before compression runs, and never below the one cluster
+    /// folding cannot reduce further.
     fn capacity(&self) -> usize {
-        usize::from(self.compression) * 10
+        (usize::from(self.compression) * CLUSTERS_PER_COMPRESSION).max(1)
     }
 }
 
