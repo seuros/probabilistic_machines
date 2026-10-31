@@ -7,7 +7,8 @@ const HEADER_LEN: usize = 13;
 const RECORD_LEN: usize = 24;
 
 /// A tracked key, its counter, and how much of that counter it may have
-/// inherited from keys evicted before it.
+/// inherited from keys evicted before it or from a merged-in stream that
+/// tracked it no longer.
 ///
 /// The true count lies in `count - overestimate ..= count`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -98,14 +99,32 @@ impl<T: Copy + Eq, const K: usize> HeavyHitters<T, K> {
         self.absorb(key, count, 0);
     }
 
-    /// Folds another table in. Counts of keys tracked by both are exact sums;
-    /// a key only one side tracked keeps that side's bounds, so the merged
-    /// table over-reports no more than its inputs did.
+    /// Folds another table in. Counts of keys tracked by both are exact sums.
+    /// A key only one side tracked may have occurred in the other stream too,
+    /// up to that side's eviction floor, so it takes the floor on both its
+    /// bounds: the counter still covers the true count and the interval
+    /// `count - overestimate ..= count` still holds it.
     pub fn merge(&mut self, other: &Self) {
+        let floor = other.floor();
+        for tracked in self.slots.iter_mut().flatten() {
+            if other.hitters().all(|hitter| hitter.key != tracked.key) {
+                tracked.count = tracked.count.saturating_add(floor);
+                tracked.overestimate = tracked.overestimate.saturating_add(floor);
+            }
+        }
         for hitter in other.hitters() {
             self.absorb(hitter.key, hitter.count, hitter.overestimate);
         }
         self.observed = self.observed.saturating_add(other.observed);
+    }
+
+    /// How often an untracked key may have occurred: nothing while a counter is
+    /// still free, otherwise the weakest counter.
+    fn floor(&self) -> u64 {
+        if self.slots.iter().any(Option::is_none) {
+            return 0;
+        }
+        self.hitters().map(|hitter| hitter.count).min().unwrap_or(0)
     }
 
     fn absorb(&mut self, key: T, count: u64, overestimate: u64) {

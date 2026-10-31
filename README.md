@@ -116,7 +116,8 @@ hh.merge(other)
 
 After `n` observations every key seen more than `n / k` times is tracked, in `k`
 counters and no heap per key. A counter can inherit the count of the key it
-evicted, so the true count lies between `count - overestimate` and `count`.
+evicted, or what a merged-in table's own evictions may have hidden, so the true
+count lies between `count - overestimate` and `count`.
 
 Keys are UTF-8 strings here: Space-Saving needs `Copy + Eq` keys in Rust, so the
 table counts 64-bit key hashes and the extension keeps the string each tracked

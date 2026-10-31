@@ -81,6 +81,44 @@ fn merging_sums_what_both_sides_tracked() {
     assert_eq!(left.observed(), 830);
 }
 
+// A key the source evicted still occurred in its stream, so the merged
+// counter used to claim an exact interval that excluded the true count.
+#[test]
+fn merging_widens_a_key_the_source_evicted() {
+    let mut source = HeavyHitters::<u32, 16>::new();
+    source.add(9_999);
+    for key in 0..16_u32 {
+        source.add_count(key, 100);
+    }
+    assert_eq!(source.count(&9_999), 0);
+
+    let mut table = HeavyHitters::<u32, 16>::new();
+    table.add_count(9_999, 1_000);
+    table.merge(&source);
+
+    assert_eq!(table.count(&9_999), 1_100);
+    for hitter in table.hitters().filter(|hitter| hitter.key == 9_999) {
+        assert_eq!(hitter.overestimate, 100);
+        assert!(hitter.count - hitter.overestimate <= 1_001);
+    }
+}
+
+#[test]
+fn a_key_both_sides_track_takes_no_floor() {
+    let mut source = HeavyHitters::<u32, 2>::new();
+    source.add_count(1, 7);
+    source.add_count(2, 5);
+
+    let mut table = HeavyHitters::<u32, 2>::new();
+    table.add_count(1, 1_000);
+    table.merge(&source);
+
+    assert_eq!(table.count(&1), 1_007);
+    for hitter in table.hitters().filter(|hitter| hitter.key == 1) {
+        assert_eq!(hitter.overestimate, 0);
+    }
+}
+
 #[test]
 fn counters_saturate_instead_of_wrapping() {
     let mut table = HeavyHitters::<u8, 2>::new();
