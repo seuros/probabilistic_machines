@@ -400,7 +400,10 @@ impl TDigest {
 /// means cannot leave it.
 // Clippy only suggests `mul_add` when `std` provides it; `core` has no
 // `f64::mul_add`, so the suggestion would break the `no_std` build.
-#[cfg_attr(feature = "std", expect(clippy::suboptimal_flops, reason = "mul_add is std-only"))]
+#[cfg_attr(
+    feature = "std",
+    expect(clippy::suboptimal_flops, reason = "mul_add is std-only")
+)]
 fn fold(left: Centroid, right: Centroid) -> Centroid {
     let weight = left.weight + right.weight;
     let low = left.mean * 0.5;
@@ -420,7 +423,10 @@ fn fold(left: Centroid, right: Centroid) -> Centroid {
 /// it does not fit.
 // Clippy only suggests `mul_add` when `std` provides it; `core` has no
 // `f64::mul_add`, so the suggestion would break the `no_std` build.
-#[cfg_attr(feature = "std", expect(clippy::suboptimal_flops, reason = "mul_add is std-only"))]
+#[cfg_attr(
+    feature = "std",
+    expect(clippy::suboptimal_flops, reason = "mul_add is std-only")
+)]
 fn lerp(at: f64, low_x: f64, low_y: f64, high_x: f64, high_y: f64) -> f64 {
     if high_x <= low_x {
         return high_y;
