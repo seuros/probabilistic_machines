@@ -70,3 +70,5 @@ end
 
 task test: :compile
 task default: %i[test cargo]
+
+Dir[File.join(__dir__, 'tasks/*.rake')].sort.each { |f| load f }
