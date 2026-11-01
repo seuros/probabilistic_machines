@@ -398,12 +398,15 @@ impl TDigest {
 /// Interpolating at half scale keeps the span of two opposite-sign extremes
 /// inside the finite range, and doubling a mean that lies between two finite
 /// means cannot leave it.
+// Clippy only suggests `mul_add` when `std` provides it; `core` has no
+// `f64::mul_add`, so the suggestion would break the `no_std` build.
+#[cfg_attr(feature = "std", expect(clippy::suboptimal_flops, reason = "mul_add is std-only"))]
 fn fold(left: Centroid, right: Centroid) -> Centroid {
     let weight = left.weight + right.weight;
     let low = left.mean * 0.5;
     let high = right.mean * 0.5;
     Centroid {
-        mean: (high - low).mul_add(right.weight / weight, low) * 2.0,
+        mean: ((high - low) * (right.weight / weight) + low) * 2.0,
         weight,
     }
 }
@@ -415,6 +418,9 @@ fn fold(left: Centroid, right: Centroid) -> Centroid {
 /// halved the way [`fold`] averages, which costs nothing while the halves stay
 /// normal but rounds a subnormal span to zero, so the span is only halved when
 /// it does not fit.
+// Clippy only suggests `mul_add` when `std` provides it; `core` has no
+// `f64::mul_add`, so the suggestion would break the `no_std` build.
+#[cfg_attr(feature = "std", expect(clippy::suboptimal_flops, reason = "mul_add is std-only"))]
 fn lerp(at: f64, low_x: f64, low_y: f64, high_x: f64, high_y: f64) -> f64 {
     if high_x <= low_x {
         return high_y;
@@ -424,9 +430,9 @@ fn lerp(at: f64, low_x: f64, low_y: f64, high_x: f64, high_y: f64) -> f64 {
         (at - low_x) / span
     } else {
         let low = low_x * 0.5;
-        at.mul_add(0.5, -low) / high_x.mul_add(0.5, -low)
+        (at * 0.5 - low) / (high_x * 0.5 - low)
     };
-    low_y.mul_add(1.0 - fraction, high_y * fraction)
+    low_y * (1.0 - fraction) + high_y * fraction
 }
 
 #[cfg(test)]
