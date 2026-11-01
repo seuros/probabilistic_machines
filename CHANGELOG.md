@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.1.2](https://github.com/seuros/probabilistic_machines/compare/probabilistic_machines/v0.1.1...probabilistic_machines/v0.1.2) (2026-11-01)
+
+
+### Features
+
+* accept any cloneable key in HeavyHitters ([108ed8c](https://github.com/seuros/probabilistic_machines/commit/108ed8c79adeffeef708aa298baa7cc64d55d12b))
+* pass a rubygems OTP through the environment ([7a6cc44](https://github.com/seuros/probabilistic_machines/commit/7a6cc446dc737f44e46c4e41b0a76d1fc9b7f5cc))
+
+
+### Bug Fixes
+
+* a republished platform gem is skipped, not fatal ([6210171](https://github.com/seuros/probabilistic_machines/commit/6210171a4ae679293d9cc6cfbdd82a9d99611a6e))
+* collect the built gems whatever depth the download puts them at ([b377177](https://github.com/seuros/probabilistic_machines/commit/b377177879e2a922184eb3e5f9965e8f8c806f00))
+* the release tag carries the gem name, and the gate uses the aggregate output ([9b949b4](https://github.com/seuros/probabilistic_machines/commit/9b949b4dc257b4251ff7c8806d6c8efdb05ac26d))
+
 ## [0.1.1](https://github.com/seuros/probabilistic_machines/compare/probabilistic_machines-v0.1.0...probabilistic_machines/v0.1.1) (2026-11-01)
 
 
