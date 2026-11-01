@@ -1,10 +1,19 @@
-# ProbabilisticMachines
+# ProbabilisticMachines 🔭
+
+> **Survey the whole stream on a fixed fuel budget.** The tender that answers how
+> many, how often and how extreme without carrying the cargo it measured.
 
 Distinct counts, quantiles and frequencies in memory you pick up front.
 
 Counting exactly means keeping every key: a `Set` of user ids, a `Hash` of path
 counts, an array of latencies to sort. These five structures answer the same
 questions from state that was sized at construction time and never grows.
+**AMS Flajolet** takes a reading and discards the sample, which is why its hold
+is the same size on the way home as it was at launch.
+
+---
+
+## 🚀 Launch Sequence
 
 ```ruby
 require 'probabilistic_machines'
@@ -16,7 +25,9 @@ visitors.estimate       # => 12_361.2
 visitors.standard_error # => 0.01625
 ```
 
-## The native extension is required
+---
+
+## 🔩 The Native Extension Is Required
 
 There is no pure-Ruby fallback and no `DISABLE_*` switch. HyperLogLog, Count-Min
 Sketch, t-digest, cuckoo hashing and Space-Saving are five algorithms, and a
@@ -25,7 +36,9 @@ of accuracy tests and two byte formats to keep in step. The gem is a binding to
 the `probabilistic-machines` crate in `ext/probabilistic_machines_native/core`,
 and it needs Ruby 4.0 and a Rust toolchain (or a platform gem).
 
-## Sizes are a fixed menu
+---
+
+## 📐 Sizes Are a Fixed Menu
 
 The crate sizes every structure by a const generic, so each size is a separately
 compiled type. The extension carries these and raises `ArgumentError` for
@@ -44,7 +57,9 @@ ProbabilisticMachines::HyperLogLog.new(registers: 3000)
 # ArgumentError: registers 3000 is not supported, expected one of [1024, 4096, 16384, 65536]
 ```
 
-## How many distinct
+---
+
+## 🌌 How Many Distinct
 
 ```ruby
 hll = ProbabilisticMachines::HyperLogLog.new(registers: 4096)
@@ -58,7 +73,9 @@ hll.merge(other)                    # exact union
 Memory is one byte per register, so 4096 registers cost 4 KiB whether the stream
 held ten ids or ten billion.
 
-## How often each
+---
+
+## 📊 How Often Each
 
 ```ruby
 cms = ProbabilisticMachines::CountMinSketch.new(width: 4096, depth: 4)
@@ -72,7 +89,9 @@ A count is over the truth by at most `e * total / width`, with probability
 `1 - e ** -depth` of staying inside it. Width buys accuracy, depth buys
 confidence.
 
-## Quantiles
+---
+
+## 📏 Quantiles
 
 ```ruby
 td = ProbabilisticMachines::TDigest.new(compression: 100)
@@ -89,7 +108,9 @@ A quantile is off by about `1 / compression` of the distribution in the middle
 and is exact at the extremes, in `compression * ln(n)` clusters rather than `n`
 samples. An empty digest answers `Float::NAN`.
 
-## Have I seen this
+---
+
+## 🛰️ Have I Seen This Contact Before
 
 ```ruby
 cf = ProbabilisticMachines::CuckooFilter.new(buckets: 4096)
@@ -102,7 +123,9 @@ cf.remove('device-9')      # unlike a Bloom filter, it can forget
 false positives. Only remove items you inserted, or you take a colliding item's
 fingerprint with it. A cuckoo filter cannot merge, so there is no `merge` here.
 
-## Who dominates
+---
+
+## 👑 Who Dominates the Stream
 
 ```ruby
 hh = ProbabilisticMachines::HeavyHitters.new(k: 64)
@@ -124,7 +147,9 @@ table counts 64-bit key hashes and the extension keeps the string each tracked
 hash came from, to hand back from `top` and `ranked`. The other four classes
 take any byte string.
 
-## Serialisation
+---
+
+## 📦 Transmitting a Reading
 
 `dump` returns the crate's own byte frame, `load` reads one back. The frame
 names its own shape, so `load` needs no keyword and rejects a blob written with
@@ -150,13 +175,28 @@ restored = ProbabilisticMachines::HeavyHitters.load(hh.dump)
 restored.top(1).first.key # => '10.0.0.1', the string, not its hash
 ```
 
-## Rust
+---
+
+## ⚙️ The Rust Core
 
 The sketches themselves are the `probabilistic-machines` crate under
 `ext/probabilistic_machines_native/core`: `no_std`, zero dependencies, allocating
 only for `TDigest` and for the `encoded` frames this extension dumps, and
 verified on bare metal. The binding crate beside it under
 `ffi/` is the Ruby surface and is not published.
+
+---
+
+## 📡 Credits
+
+**AMS Flajolet**, NCC-0185, *Flajolet*-class tender.
+
+Named for Philippe Flajolet and G. Nigel Martin's *Probabilistic Counting
+Algorithms for Data Base Applications* (1985), and for Flajolet, Fusy, Gandouet
+and Meunier's *HyperLogLog* (2007), which established that you can count what
+you refuse to store.
+
+---
 
 ## License
 
