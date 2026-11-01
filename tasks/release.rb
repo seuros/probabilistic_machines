@@ -118,10 +118,11 @@ module ProbabilisticMachinesRelease
     release_version = version(tag)
     artifacts = pending(fetch(tag), published_versions, release_version)
     require 'bundler'
+    otp = ENV.fetch('GEM_OTP', nil)
     artifacts.each do |artifact|
-      success = Bundler.with_unbundled_env do
-        system(Gem.ruby, '-S', 'gem', 'push', artifact.path, '--host', HOST)
-      end
+      command = [Gem.ruby, '-S', 'gem', 'push', artifact.path, '--host', HOST]
+      command.push('--otp', otp) unless otp.nil? || otp.empty?
+      success = Bundler.with_unbundled_env { system(*command) }
       raise Error, "not pushed: #{File.basename(artifact.path)}; rerun gems:push_all to resume" unless success
     end
     puts "All release gems published for #{GEM} v#{release_version}"
