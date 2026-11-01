@@ -167,6 +167,7 @@ dependencies = [
  "bytes",
  "magnus",
  "probabilistic-machines",
+ "rb-sys",
 ]
 
 [[package]]
