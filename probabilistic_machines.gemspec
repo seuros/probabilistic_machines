@@ -38,5 +38,8 @@ Gem::Specification.new do |spec|
   spec.require_paths = ['lib']
   spec.extensions = ['ext/probabilistic_machines_native/extconf.rb']
 
-  spec.add_development_dependency 'rb_sys', '~> 0.9'
+  # A source install runs extconf.rb, which requires rb_sys/mkmf, and RubyGems
+  # clears GEM_PATH while building the extension. Without this the build only
+  # works where rb_sys happens to be installed globally.
+  spec.add_dependency 'rb_sys', '~> 0.9'
 end
