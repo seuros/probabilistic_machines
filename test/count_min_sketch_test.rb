@@ -77,6 +77,39 @@ module ProbabilisticMachines
       end
     end
 
+    # The widest count a single counter holds before it stops rising.
+    COUNTER_LIMIT = (2**32) - 1
+
+    def test_a_counter_reports_itself_saturated_only_once_it_stops_rising
+      sketch = CountMinSketch.new(width: 1024, depth: 4)
+
+      refute_predicate sketch, :saturated?
+
+      sketch.add('path', count: COUNTER_LIMIT)
+
+      refute_predicate sketch, :saturated?
+      assert_equal COUNTER_LIMIT, sketch.count('path')
+
+      sketch.add('path')
+
+      assert_predicate sketch, :saturated?
+      assert_equal COUNTER_LIMIT, sketch.count('path')
+      assert_equal COUNTER_LIMIT + 1, sketch.total
+    end
+
+    def test_saturation_survives_a_merge_and_a_round_trip
+      saturated = CountMinSketch.new(width: 1024, depth: 4)
+      saturated.add('path', count: COUNTER_LIMIT)
+      saturated.add('path')
+
+      assert_predicate CountMinSketch.load(saturated.dump), :saturated?
+
+      fresh = CountMinSketch.new(width: 1024, depth: 4)
+      fresh.merge(saturated)
+
+      assert_predicate fresh, :saturated?
+    end
+
     def test_merge_with_the_receiver_doubles_it
       sketch = CountMinSketch.new(width: 1024, depth: 4)
       sketch.add('path', count: 5)
