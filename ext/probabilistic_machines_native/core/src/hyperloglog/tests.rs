@@ -8,6 +8,7 @@ fn fill<const M: usize>(sketch: &mut HyperLogLog<M>, range: core::ops::Range<u32
     }
 }
 
+#[cfg(feature = "std")]
 fn relative_error(estimate: f64, truth: f64) -> f64 {
     (estimate - truth).abs() / truth
 }
