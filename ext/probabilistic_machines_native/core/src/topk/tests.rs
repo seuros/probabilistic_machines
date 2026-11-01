@@ -279,3 +279,30 @@ fn a_frame_from_another_structure_is_refused() {
     assert_eq!(counters.encode(&mut frame), Ok(12 + 4 * 2 * 4));
     assert_eq!(HeavyHitters::<u64, 8>::decode(&frame), Err(CodecError::Tag));
 }
+
+/// An owned key needs no interning: the table clones on insert and compares by
+/// value, so a layer name is a usable key on its own.
+#[cfg(feature = "alloc")]
+#[test]
+fn an_owned_key_needs_no_interning() {
+    use alloc::string::{String, ToString};
+
+    let mut layers = HeavyHitters::<String, 8>::new();
+    for tick in 0..900 {
+        layers.add(if tick % 3 == 0 { "horizon" } else { "stars" }.to_string());
+    }
+    layers.add("grid".to_string());
+
+    assert_eq!(layers.count(&"stars".to_string()), 600);
+    assert_eq!(layers.count(&"horizon".to_string()), 300);
+    assert_eq!(
+        layers.top().map(|hitter| hitter.key.as_str()),
+        Some("stars")
+    );
+
+    let mut merged = HeavyHitters::<String, 8>::new();
+    merged.add_count("grid".to_string(), 5);
+    merged.merge(&layers);
+    assert_eq!(merged.count(&"grid".to_string()), 6);
+    assert_eq!(merged.observed(), 906);
+}

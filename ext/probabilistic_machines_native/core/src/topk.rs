@@ -28,6 +28,13 @@ pub struct Hitter<T> {
 /// insertions scan all `K` counters, which is the trade for needing no heap and
 /// no key ordering: keep `K` in the dozens-to-hundreds range.
 ///
+/// A key need only be [`Clone`] and [`Eq`], so owned keys work directly:
+/// `HeavyHitters<String, 64>` tracks layer names without interning them first.
+/// Cloning happens on insert and on [`merge`](Self::merge), never on a lookup,
+/// so a cheap key is worth having but a `String` is not a mistake. Interning to
+/// a `u32` id, or hashing with [`hash64`](crate::hash64) the way the Ruby
+/// binding does, keeps the table [`Copy`] and the scan cache-friendly.
+///
 /// ```
 /// use probabilistic_machines::HeavyHitters;
 ///
@@ -48,7 +55,7 @@ pub struct HeavyHitters<T, const K: usize> {
     observed: u64,
 }
 
-impl<T: Copy + Eq, const K: usize> HeavyHitters<T, K> {
+impl<T: Clone + Eq, const K: usize> HeavyHitters<T, K> {
     #[must_use]
     pub const fn new() -> Self {
         Self {
@@ -116,7 +123,7 @@ impl<T: Copy + Eq, const K: usize> HeavyHitters<T, K> {
             }
         }
         for hitter in other.hitters() {
-            self.absorb(hitter.key, hitter.count, hitter.overestimate);
+            self.absorb(hitter.key.clone(), hitter.count, hitter.overestimate);
         }
         self.observed = self.observed.saturating_add(other.observed);
     }
@@ -304,18 +311,18 @@ fn records_are_coherent(records: &[[u8; RECORD_LEN]], observed: u64) -> bool {
     })
 }
 
-impl<T: Copy + Eq, const K: usize> Default for HeavyHitters<T, K> {
+impl<T: Clone + Eq, const K: usize> Default for HeavyHitters<T, K> {
     fn default() -> Self {
         Self::new()
     }
 }
 
 #[cfg(feature = "alloc")]
-impl<T: Copy + Eq, const K: usize> HeavyHitters<T, K> {
+impl<T: Clone + Eq, const K: usize> HeavyHitters<T, K> {
     /// Tracked keys, most frequent first.
     #[must_use]
     pub fn ranked(&self) -> alloc::vec::Vec<Hitter<T>> {
-        let mut ranked: alloc::vec::Vec<Hitter<T>> = self.hitters().copied().collect();
+        let mut ranked: alloc::vec::Vec<Hitter<T>> = self.hitters().cloned().collect();
         ranked.sort_unstable_by_key(|hitter| core::cmp::Reverse(hitter.count));
         ranked
     }
