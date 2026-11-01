@@ -13,7 +13,14 @@ jobs:
       - uses: actions/checkout@v7
       - uses: jdx/mise-action@v5
         with:
-          install_args: rust
+          # rb-sys gates part of the magnus API on the Ruby it builds against,
+          # so the binding crate needs a Ruby here even though the core does
+          # not. Without one, Ruby::define_data is compiled out and the lint
+          # fails on a method that exists everywhere it is actually used.
+          mise_toml: |
+            [tools]
+            ruby = "4.0"
+            rust = { version = "1.99", components = "clippy,rustfmt" }
 
       - name: Locate the crates
         id: crates
