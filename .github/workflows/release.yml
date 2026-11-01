@@ -146,10 +146,12 @@ jobs:
           if [ -f existing/SHA256SUMS ]; then
             (cd existing && sha256sum --check SHA256SUMS)
           fi
-          cp artifacts/*/*.gem combined/
+          # download-artifact flattens a lone artifact and nests several, so
+          # the depth is not fixed.
+          find artifacts -name '*.gem' -exec cp {} combined/ \;
           find existing -name '*.gem' -exec cp -n {} combined/ \;
           (cd combined && sha256sum -- *.gem > SHA256SUMS)
-          gh release upload "$TAG" artifacts/*/*.gem combined/SHA256SUMS --clobber
+          gh release upload "$TAG" combined/*.gem combined/SHA256SUMS --clobber
 
   publish-to-github-packages:
     needs:
