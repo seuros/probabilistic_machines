@@ -117,6 +117,12 @@ assert_eq!(sketch.encode(&mut frame), Ok(66));
 assert_eq!(HyperLogLog::<64>::decode(&frame), Ok(sketch));
 ```
 
+A key need only be `Clone` and `Eq`, so owned keys work without interning:
+`HeavyHitters<String, 64>` tracks layer names as they are. Cloning happens on
+insert and on `merge`, never on a lookup, so a cheap key is worth having but a
+`String` is not a mistake. Interning to a `u32`, or hashing with `hash64` the
+way the Ruby binding does, keeps the table `Copy` and the scan cache-friendly.
+
 `HeavyHitters` codes only with `u64` keys, which is what a hash-keyed heavy
 hitter is; a general `T` has no byte form.
 
