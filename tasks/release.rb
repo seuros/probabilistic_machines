@@ -69,7 +69,7 @@ module ProbabilisticMachinesRelease
     destination = File.join(ROOT, 'pkg')
     FileUtils.mkdir_p(destination)
     Dir.mktmpdir("#{GEM}-release") do |directory|
-      downloaded = system('gh', 'release', 'download', "v#{release_version}", '--repo', REPOSITORY,
+      downloaded = system('gh', 'release', 'download', "#{GEM}/v#{release_version}", '--repo', REPOSITORY,
                           '--pattern', "#{GEM}-#{release_version}*.gem", '--pattern', 'SHA256SUMS',
                           '--dir', directory)
       raise Error, 'GitHub release download failed' unless downloaded
@@ -81,7 +81,7 @@ module ProbabilisticMachinesRelease
         Artifact.new(path: path, platform: artifact.platform, sha256: artifact.sha256)
       end.tap do |copied|
         FileUtils.cp(File.join(directory, 'SHA256SUMS'), destination)
-        puts "Verified #{copied.size} gems for v#{release_version} in #{destination}"
+        puts "Verified #{copied.size} gems for #{GEM} v#{release_version} in #{destination}"
       end
     end
   end
@@ -124,6 +124,6 @@ module ProbabilisticMachinesRelease
       end
       raise Error, "not pushed: #{File.basename(artifact.path)}; rerun gems:push_all to resume" unless success
     end
-    puts "All release gems published for v#{release_version}"
+    puts "All release gems published for #{GEM} v#{release_version}"
   end
 end
