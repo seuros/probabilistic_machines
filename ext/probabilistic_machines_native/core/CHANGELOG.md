@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.0](https://github.com/seuros/probabilistic_machines/compare/probabilistic-machines-v0.2.0...probabilistic-machines-v0.3.0) (2026-11-01)
+
+
+### Features
+
+* accept any cloneable key in HeavyHitters ([108ed8c](https://github.com/seuros/probabilistic_machines/commit/108ed8c79adeffeef708aa298baa7cc64d55d12b))
+
 ## [0.2.0](https://github.com/seuros/probabilistic_machines/compare/probabilistic-machines-v0.1.0...probabilistic-machines-v0.2.0) (2026-11-01)
 
 
