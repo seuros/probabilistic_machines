@@ -16,5 +16,5 @@ workspace = true
 
 [dependencies]
 probabilistic-machines = { workspace = true, features = ["std"] }
-magnus = { version = "0.9", features = ["bytes"] }
+magnus = { version = ">= 0.9.3", default-features = false, features = ["bytes", "io"] }
 bytes = "1"
