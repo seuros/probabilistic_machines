@@ -15,6 +15,18 @@ use crate::{Whole, codec_error, optional_kwarg, required_kwarg};
 /// centroid and a quantile is meaningless.
 const MIN_COMPRESSION: u16 = 10;
 
+/// The compressions this binding answers for, whether the digest is being built
+/// or read back.
+fn honoured(ruby: &Ruby, compression: u16) -> Result<u16, Error> {
+    if compression < MIN_COMPRESSION {
+        return Err(Error::new(
+            ruby.exception_arg_error(),
+            format!("compression must be at least {MIN_COMPRESSION}, got {compression}"),
+        ));
+    }
+    Ok(compression)
+}
+
 #[magnus::wrap(class = "ProbabilisticMachines::TDigest", free_immediately, size)]
 struct Wrapper(RefCell<TDigest>);
 
@@ -22,17 +34,15 @@ impl Wrapper {
     fn new(ruby: &Ruby, args: &[Value]) -> Result<Self, Error> {
         let args = scan_args::<(), (), (), (), RHash, ()>(args)?;
         let Whole(compression) = required_kwarg::<Whole<u16>>(args.keywords, "compression")?;
-        if compression < MIN_COMPRESSION {
-            return Err(Error::new(
-                ruby.exception_arg_error(),
-                format!("compression must be at least {MIN_COMPRESSION}, got {compression}"),
-            ));
-        }
-        Ok(Self(RefCell::new(TDigest::new(compression))))
+        Ok(Self(RefCell::new(TDigest::new(honoured(
+            ruby,
+            compression,
+        )?))))
     }
 
     fn load(ruby: &Ruby, blob: Bytes) -> Result<Self, Error> {
         let digest = TDigest::decode(&blob).map_err(|error| codec_error(ruby, error))?;
+        honoured(ruby, digest.compression())?;
         Ok(Self(RefCell::new(digest)))
     }
 

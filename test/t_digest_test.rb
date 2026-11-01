@@ -103,6 +103,19 @@ module ProbabilisticMachines
       assert_raises(ArgumentError) { TDigest.new(compression: 0) }
     end
 
+    def test_a_blob_claiming_a_compression_the_binding_refuses_does_not_load
+      digest = TDigest.new(compression: 10)
+      digest.add(1.0)
+
+      [0, 1, 9].each do |refused|
+        blob = digest.dump
+        blob[1, 2] = [refused].pack('S<')
+
+        assert_raises(ArgumentError) { TDigest.load(blob) }
+      end
+      assert_equal 10, TDigest.load(digest.dump).compression
+    end
+
     def test_a_total_weight_that_cannot_stay_finite_is_rejected
       digest = TDigest.new(compression: 100)
       digest.add(1.0, weight: 1e308)
