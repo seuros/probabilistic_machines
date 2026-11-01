@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.3](https://github.com/seuros/probabilistic_machines/compare/probabilistic_machines/v0.1.2...probabilistic_machines/v0.1.3) (2026-11-01)
+
+
+### Bug Fixes
+
+* enable the rb-sys compiled fallback so new Rubies can build ([e8a649d](https://github.com/seuros/probabilistic_machines/commit/e8a649d45475c77f0a5d19c5fa1477100da0cc1b))
+
 ## [0.1.2](https://github.com/seuros/probabilistic_machines/compare/probabilistic_machines/v0.1.1...probabilistic_machines/v0.1.2) (2026-11-01)
 
 
