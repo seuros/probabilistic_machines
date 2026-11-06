@@ -2,7 +2,7 @@
 
 use alloc::vec::Vec;
 
-use crate::{CodecError, TAG_TDIGEST, read8};
+use crate::{CodecError, TAG_TDIGEST, open_frame, read8};
 
 const HEADER_LEN: usize = 31;
 const CENTROID_LEN: usize = 16;
@@ -323,12 +323,7 @@ impl TDigest {
     /// [`CodecError::Parameters`] when the clusters, the total weight and the
     /// extremes contradict each other.
     pub fn decode(bytes: &[u8]) -> Result<Self, CodecError> {
-        let Some(header) = bytes.get(..HEADER_LEN) else {
-            return Err(CodecError::Truncated);
-        };
-        if header[0] != TAG_TDIGEST {
-            return Err(CodecError::Tag);
-        }
+        let header = open_frame(bytes, HEADER_LEN, TAG_TDIGEST)?;
         let counted = u32::from_le_bytes([header[3], header[4], header[5], header[6]]);
         let Ok(clusters) = usize::try_from(counted) else {
             return Err(CodecError::Truncated);

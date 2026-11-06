@@ -1,7 +1,7 @@
 //! Frequency estimation for a stream nobody wants to store.
 
 use crate::hash::{hash64, mix64, u32_low_u8, u64_low_u16, usize_low_u8};
-use crate::{CodecError, TAG_COUNTMIN, read8};
+use crate::{CodecError, TAG_COUNTMIN, encode_frame, open_frame, read8};
 
 const HEADER_LEN: usize = 12;
 const COUNTER_LEN: usize = 4;
@@ -132,20 +132,14 @@ impl<const W: usize, const D: usize> CountMinSketch<W, D> {
     /// [`CodecError::Truncated`] when `out` is shorter than
     /// [`ENCODED_LEN`](Self::ENCODED_LEN).
     pub fn encode(&self, out: &mut [u8]) -> Result<usize, CodecError> {
-        let Some(frame) = out.get_mut(..Self::ENCODED_LEN) else {
-            return Err(CodecError::Truncated);
-        };
-        self.write_frame(frame);
-        Ok(Self::ENCODED_LEN)
+        encode_frame(out, Self::ENCODED_LEN, |frame| self.write_frame(frame))
     }
 
     /// The sketch's frame, exactly [`ENCODED_LEN`](Self::ENCODED_LEN) bytes.
     #[cfg(feature = "alloc")]
     #[must_use]
     pub fn encoded(&self) -> alloc::boxed::Box<[u8]> {
-        let mut frame = alloc::vec![0_u8; Self::ENCODED_LEN].into_boxed_slice();
-        self.write_frame(&mut frame);
-        frame
+        crate::encoded_frame(Self::ENCODED_LEN, |frame| self.write_frame(frame))
     }
 
     /// Fills a frame of exactly [`ENCODED_LEN`](Self::ENCODED_LEN) bytes.
@@ -185,12 +179,7 @@ impl<const W: usize, const D: usize> CountMinSketch<W, D> {
     ///
     /// The same as [`decode`](Self::decode).
     pub fn decode_into(&mut self, bytes: &[u8]) -> Result<(), CodecError> {
-        let Some(frame) = bytes.get(..Self::ENCODED_LEN) else {
-            return Err(CodecError::Truncated);
-        };
-        if frame[0] != TAG_COUNTMIN {
-            return Err(CodecError::Tag);
-        }
+        let frame = open_frame(bytes, Self::ENCODED_LEN, TAG_COUNTMIN)?;
         if frame[1] != u32_low_u8(W.trailing_zeros()) || frame[2] != usize_low_u8(D) {
             return Err(CodecError::Parameters);
         }

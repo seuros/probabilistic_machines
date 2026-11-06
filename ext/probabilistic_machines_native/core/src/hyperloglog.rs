@@ -1,7 +1,7 @@
 //! Distinct-count estimation in a fixed array of registers.
 
 use crate::hash::{hash64, u32_low_u8, u64_low_u16};
-use crate::{CodecError, TAG_HYPERLOGLOG};
+use crate::{CodecError, TAG_HYPERLOGLOG, encode_frame, open_frame};
 
 /// Odd terms of `2 * atanh(t) = ln((1 + t) / (1 - t))`, in Horner order.
 const ATANH_COEFFICIENTS: [f64; 5] = [2.0, 2.0 / 3.0, 0.4, 2.0 / 7.0, 2.0 / 9.0];
@@ -145,20 +145,14 @@ impl<const M: usize> HyperLogLog<M> {
     /// [`CodecError::Truncated`] when `out` is shorter than
     /// [`ENCODED_LEN`](Self::ENCODED_LEN).
     pub fn encode(&self, out: &mut [u8]) -> Result<usize, CodecError> {
-        let Some(frame) = out.get_mut(..Self::ENCODED_LEN) else {
-            return Err(CodecError::Truncated);
-        };
-        self.write_frame(frame);
-        Ok(Self::ENCODED_LEN)
+        encode_frame(out, Self::ENCODED_LEN, |frame| self.write_frame(frame))
     }
 
     /// The sketch's frame, exactly [`ENCODED_LEN`](Self::ENCODED_LEN) bytes.
     #[cfg(feature = "alloc")]
     #[must_use]
     pub fn encoded(&self) -> alloc::boxed::Box<[u8]> {
-        let mut frame = alloc::vec![0_u8; Self::ENCODED_LEN].into_boxed_slice();
-        self.write_frame(&mut frame);
-        frame
+        crate::encoded_frame(Self::ENCODED_LEN, |frame| self.write_frame(frame))
     }
 
     /// Fills a frame of exactly [`ENCODED_LEN`](Self::ENCODED_LEN) bytes.
@@ -191,12 +185,7 @@ impl<const M: usize> HyperLogLog<M> {
     ///
     /// The same as [`decode`](Self::decode).
     pub fn decode_into(&mut self, bytes: &[u8]) -> Result<(), CodecError> {
-        let Some(frame) = bytes.get(..Self::ENCODED_LEN) else {
-            return Err(CodecError::Truncated);
-        };
-        if frame[0] != TAG_HYPERLOGLOG {
-            return Err(CodecError::Tag);
-        }
+        let frame = open_frame(bytes, Self::ENCODED_LEN, TAG_HYPERLOGLOG)?;
         if frame[1] != u32_low_u8(Self::PRECISION) {
             return Err(CodecError::Parameters);
         }

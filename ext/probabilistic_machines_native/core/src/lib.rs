@@ -63,3 +63,37 @@ pub(crate) const fn read8(bytes: &[u8]) -> [u8; 8] {
     buffer.copy_from_slice(bytes);
     buffer
 }
+
+/// Fills the first `len` bytes of `out` through `write`, for the fixed-size
+/// frames every sketch encodes to.
+pub(crate) fn encode_frame(
+    out: &mut [u8],
+    len: usize,
+    write: impl FnOnce(&mut [u8]),
+) -> Result<usize, CodecError> {
+    let Some(frame) = out.get_mut(..len) else {
+        return Err(CodecError::Truncated);
+    };
+    write(frame);
+    Ok(len)
+}
+
+/// A freshly allocated `len`-byte frame filled through `write`.
+#[cfg(feature = "alloc")]
+pub(crate) fn encoded_frame(len: usize, write: impl FnOnce(&mut [u8])) -> alloc::boxed::Box<[u8]> {
+    let mut frame = alloc::vec![0_u8; len].into_boxed_slice();
+    write(&mut frame);
+    frame
+}
+
+/// The first `len` bytes of `bytes`, once they are known to be a frame tagged
+/// `tag`.
+pub(crate) fn open_frame(bytes: &[u8], len: usize, tag: u8) -> Result<&[u8], CodecError> {
+    let Some(frame) = bytes.get(..len) else {
+        return Err(CodecError::Truncated);
+    };
+    if frame[0] != tag {
+        return Err(CodecError::Tag);
+    }
+    Ok(frame)
+}

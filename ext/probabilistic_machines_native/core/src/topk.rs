@@ -1,7 +1,7 @@
 //! Which keys dominate a stream, in `K` counters instead of one per key.
 
 use crate::hash::usize_low_u16;
-use crate::{CodecError, TAG_TOPK, read8};
+use crate::{CodecError, TAG_TOPK, encode_frame, open_frame, read8};
 
 const HEADER_LEN: usize = 13;
 const RECORD_LEN: usize = 24;
@@ -197,20 +197,14 @@ impl<const K: usize> HeavyHitters<u64, K> {
     /// [`CodecError::Truncated`] when `out` is shorter than
     /// [`ENCODED_LEN`](Self::ENCODED_LEN).
     pub fn encode(&self, out: &mut [u8]) -> Result<usize, CodecError> {
-        let Some(frame) = out.get_mut(..Self::ENCODED_LEN) else {
-            return Err(CodecError::Truncated);
-        };
-        self.write_frame(frame);
-        Ok(Self::ENCODED_LEN)
+        encode_frame(out, Self::ENCODED_LEN, |frame| self.write_frame(frame))
     }
 
     /// The table's frame, exactly [`ENCODED_LEN`](Self::ENCODED_LEN) bytes.
     #[cfg(feature = "alloc")]
     #[must_use]
     pub fn encoded(&self) -> alloc::boxed::Box<[u8]> {
-        let mut frame = alloc::vec![0_u8; Self::ENCODED_LEN].into_boxed_slice();
-        self.write_frame(&mut frame);
-        frame
+        crate::encoded_frame(Self::ENCODED_LEN, |frame| self.write_frame(frame))
     }
 
     /// Fills a frame of exactly [`ENCODED_LEN`](Self::ENCODED_LEN) bytes.
@@ -252,12 +246,7 @@ impl<const K: usize> HeavyHitters<u64, K> {
     ///
     /// The same as [`decode`](Self::decode).
     pub fn decode_into(&mut self, bytes: &[u8]) -> Result<(), CodecError> {
-        let Some(frame) = bytes.get(..Self::ENCODED_LEN) else {
-            return Err(CodecError::Truncated);
-        };
-        if frame[0] != TAG_TOPK {
-            return Err(CodecError::Tag);
-        }
+        let frame = open_frame(bytes, Self::ENCODED_LEN, TAG_TOPK)?;
         if frame[1..3] != Self::COUNTERS {
             return Err(CodecError::Parameters);
         }
