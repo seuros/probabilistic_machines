@@ -10,7 +10,7 @@ repository = "https://github.com/seuros/probabilistic_machines"
 keywords = ["hyperloglog", "t-digest", "count-min", "sketch", "no-std"]
 categories = ["no-std", "algorithms", "data-structures"]
 readme = "README.md"
-
+exclude = ["src/**/tests.rs", "tests/"]
 [lib]
 name = "probabilistic_machines"
 crate-type = ["lib"]
