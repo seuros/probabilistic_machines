@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.3.1](https://github.com/seuros/probabilistic_machines/compare/probabilistic-machines-v0.3.0...probabilistic-machines-v0.3.1) (2026-11-06)
+
+
+### Bug Fixes
+
+* keep test modules out of the packaged crate ([e3c1a1f](https://github.com/seuros/probabilistic_machines/commit/e3c1a1f7376dbada6efe782c1d4d264273483432))
+* share frame encode/decode helpers across sketches ([067d23d](https://github.com/seuros/probabilistic_machines/commit/067d23db55b8b9068fdef445a7f6dee483961a82))
+
 ## [0.3.0](https://github.com/seuros/probabilistic_machines/compare/probabilistic-machines-v0.2.0...probabilistic-machines-v0.3.0) (2026-11-01)
 
 
