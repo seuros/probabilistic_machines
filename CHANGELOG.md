@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.3.0](https://github.com/seuros/probabilistic_machines/compare/probabilistic_machines/v0.2.0...probabilistic_machines/v0.3.0) (2026-11-14)
+
+
+### ⚠ BREAKING CHANGES
+
+* adopt matryona-machines 0.2: exact merge partners, symbols! tables, caret rb-sys, missing_docs
+
+### Features
+
+* adopt matryona-machines 0.2: exact merge partners, symbols! tables, caret rb-sys, missing_docs ([0baae63](https://github.com/seuros/probabilistic_machines/commit/0baae63c30b5a53bdf57646cc590c81877b5ff62))
+
 ## [0.2.0](https://github.com/seuros/probabilistic_machines/compare/probabilistic_machines/v0.1.4...probabilistic_machines/v0.2.0) (2026-11-14)
 
 
