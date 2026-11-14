@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.4.0](https://github.com/seuros/probabilistic_machines/compare/probabilistic_machines/v0.3.0...probabilistic_machines/v0.4.0) (2026-11-14)
+
+
+### ⚠ BREAKING CHANGES
+
+* adopt matryona 0.3 exact strings, real/finite and named merge partners
+
+### Features
+
+* adopt matryona 0.3 exact strings, real/finite and named merge partners ([bea30f3](https://github.com/seuros/probabilistic_machines/commit/bea30f3f9ffac8d007535993fd6337e91113cc28))
+
 ## [0.3.0](https://github.com/seuros/probabilistic_machines/compare/probabilistic_machines/v0.2.0...probabilistic_machines/v0.3.0) (2026-11-14)
 
 
