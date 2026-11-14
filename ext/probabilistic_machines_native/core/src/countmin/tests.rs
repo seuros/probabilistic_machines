@@ -1,5 +1,5 @@
 use super::CountMinSketch;
-use crate::CodecError;
+use crate::Refusal;
 use crate::hash::mix64;
 
 fn key(index: u32) -> [u8; 8] {
@@ -14,7 +14,7 @@ fn truth(index: u32) -> u32 {
 fn an_estimate_is_never_below_the_truth() {
     let mut sketch = CountMinSketch::<2048, 5>::new();
     for index in 0..4_000 {
-        sketch.add_count(&key(index), truth(index));
+        assert_eq!(sketch.add_count(&key(index), truth(index)), Ok(()));
     }
 
     for index in 0..4_000 {
@@ -27,7 +27,7 @@ fn an_estimate_is_never_below_the_truth() {
 fn the_overshoot_stays_inside_the_sketch_width() {
     let mut sketch = CountMinSketch::<2048, 5>::new();
     for index in 0..4_000 {
-        sketch.add_count(&key(index), truth(index));
+        assert_eq!(sketch.add_count(&key(index), truth(index)), Ok(()));
     }
 
     let total: u32 = (0..4_000).map(truth).sum();
@@ -49,38 +49,21 @@ fn an_untouched_sketch_estimates_nothing() {
 }
 
 #[test]
-fn counters_and_totals_saturate_instead_of_wrapping() {
-    let mut sketch = CountMinSketch::<16, 2>::new();
-    sketch.add_count(b"hot", u32::MAX);
-    sketch.add_count(b"hot", u32::MAX);
-
-    assert_eq!(sketch.estimate(b"hot"), u32::MAX);
-    assert_eq!(sketch.total(), u64::from(u32::MAX) * 2);
-
-    let mut full = CountMinSketch::<16, 2>::new();
-    full.add_count(b"hot", u32::MAX);
-    let mut other = full.clone();
-    other.merge(&full);
-    other.merge(&full);
-    assert_eq!(other.estimate(b"hot"), u32::MAX);
-}
-
-#[test]
 fn merging_equals_feeding_one_sketch_both_streams() {
     let mut left = CountMinSketch::<256, 4>::new();
     let mut right = CountMinSketch::<256, 4>::new();
     let mut together = CountMinSketch::<256, 4>::new();
 
     for index in 0..500 {
-        left.add_count(&key(index), truth(index));
-        together.add_count(&key(index), truth(index));
+        assert_eq!(left.add_count(&key(index), truth(index)), Ok(()));
+        assert_eq!(together.add_count(&key(index), truth(index)), Ok(()));
     }
     for index in 300..900 {
-        right.add_count(&key(index), truth(index));
-        together.add_count(&key(index), truth(index));
+        assert_eq!(right.add_count(&key(index), truth(index)), Ok(()));
+        assert_eq!(together.add_count(&key(index), truth(index)), Ok(()));
     }
 
-    left.merge(&right);
+    assert_eq!(left.merge(&right), Ok(()));
     assert_eq!(left, together);
     assert_eq!(left.total(), together.total());
 }
@@ -89,7 +72,7 @@ fn merging_equals_feeding_one_sketch_both_streams() {
 fn frames_round_trip_and_reject_foreign_bytes() {
     let mut sketch = CountMinSketch::<32, 3>::new();
     for index in 0..200 {
-        sketch.add(&key(index));
+        assert_eq!(sketch.add(&key(index)), Ok(()));
     }
 
     let mut frame = [0_u8; CountMinSketch::<32, 3>::ENCODED_LEN];
@@ -99,27 +82,24 @@ fn frames_round_trip_and_reject_foreign_bytes() {
     assert_eq!(CountMinSketch::<32, 3>::decode(&frame), Ok(sketch.clone()));
 
     let short = frame.len() - 1;
-    assert_eq!(
-        sketch.encode(&mut frame[..short]),
-        Err(CodecError::Truncated)
-    );
+    assert_eq!(sketch.encode(&mut frame[..short]), Err(Refusal::Truncated));
     assert_eq!(
         CountMinSketch::<32, 3>::decode(&frame[..short]),
-        Err(CodecError::Truncated)
+        Err(Refusal::Truncated)
     );
 
     let mut wrong = frame;
     wrong[0] = 0x00;
     assert_eq!(
         CountMinSketch::<32, 3>::decode(&wrong),
-        Err(CodecError::Tag)
+        Err(Refusal::WrongStructure)
     );
 
     let mut lying = frame;
     lying[2] = 2;
     assert_eq!(
         CountMinSketch::<32, 3>::decode(&lying),
-        Err(CodecError::Parameters)
+        Err(Refusal::WrongShape)
     );
 }
 
@@ -128,7 +108,7 @@ fn frames_round_trip_and_reject_foreign_bytes() {
 #[test]
 fn counters_the_total_cannot_explain_are_refused() {
     let mut sketch = CountMinSketch::<32, 3>::new();
-    sketch.add_count(b"x", 10);
+    assert_eq!(sketch.add_count(b"x", 10), Ok(()));
 
     let mut frame = [0_u8; CountMinSketch::<32, 3>::ENCODED_LEN];
     assert_eq!(sketch.encode(&mut frame), Ok(frame.len()));
@@ -137,57 +117,103 @@ fn counters_the_total_cannot_explain_are_refused() {
     emptied[3] = 0;
     assert_eq!(
         CountMinSketch::<32, 3>::decode(&emptied),
-        Err(CodecError::Parameters)
+        Err(Refusal::Malformed)
     );
 
     let mut inflated = frame;
     inflated[3] = 11;
     assert_eq!(
         CountMinSketch::<32, 3>::decode(&inflated),
-        Err(CodecError::Parameters)
+        Err(Refusal::Malformed)
     );
 
-    let mut saturated = CountMinSketch::<32, 3>::new();
-    saturated.add_count(b"x", u32::MAX);
-    saturated.add(b"x");
-    assert!(saturated.saturated());
-    assert!(u64::from(saturated.estimate(b"x")) < saturated.total());
-
-    assert_eq!(saturated.encode(&mut frame), Ok(frame.len()));
-    assert_eq!(CountMinSketch::<32, 3>::decode(&frame), Ok(saturated));
+    let mut flagged = frame;
+    flagged[11] = 1;
+    assert_eq!(
+        CountMinSketch::<32, 3>::decode(&flagged),
+        Err(Refusal::Malformed)
+    );
+    assert_eq!(CountMinSketch::<32, 3>::decode(&frame), Ok(sketch));
 }
 
 #[test]
 fn a_single_row_still_counts() {
     let mut sketch = CountMinSketch::<4096, 1>::new();
-    sketch.add_count(b"only", 9);
+    assert_eq!(sketch.add_count(b"only", 9), Ok(()));
     assert!(sketch.estimate(b"only") >= 9);
 }
 
-// Saturating silently returned an estimate below the true count, so the
-// never-underestimate guarantee needs a flag that says when it stops holding.
+// Saturating silently left an estimate below the true count, so the
+// never-underestimate guarantee only held behind a flag. An addition that
+// would carry a counter past u32::MAX is now refused and changes nothing.
 #[test]
-fn saturation_is_reported_rather_than_silent() {
+fn an_addition_past_a_full_counter_is_refused_and_changes_nothing() {
     let mut sketch = CountMinSketch::<32, 3>::new();
-    sketch.add_count(b"x", u32::MAX);
-    assert!(!sketch.saturated());
+    assert_eq!(sketch.add_count(b"x", u32::MAX), Ok(()));
+    let before = sketch.clone();
 
-    sketch.add(b"x");
-
-    assert!(sketch.saturated());
+    assert_eq!(sketch.add(b"x"), Err(Refusal::Overflow));
+    assert_eq!(sketch, before);
     assert_eq!(sketch.estimate(b"x"), u32::MAX);
+    assert_eq!(sketch.total(), u64::from(u32::MAX));
 }
 
-#[cfg(feature = "alloc")]
 #[test]
-fn saturation_survives_a_round_trip() {
+fn a_merge_past_a_full_counter_is_refused_and_changes_nothing() {
+    let mut sketch = CountMinSketch::<16, 2>::new();
+    assert_eq!(sketch.add_count(b"hot", u32::MAX), Ok(()));
+    let mut other = CountMinSketch::<16, 2>::new();
+    assert_eq!(other.add(b"hot"), Ok(()));
+    let before = sketch.clone();
+
+    assert_eq!(sketch.merge(&other), Err(Refusal::Overflow));
+    assert_eq!(sketch, before);
+}
+
+#[test]
+fn a_zero_count_is_refused_and_changes_nothing() {
     let mut sketch = CountMinSketch::<32, 3>::new();
-    sketch.add_count(b"x", u32::MAX);
-    sketch.add(b"x");
-    assert!(sketch.saturated());
+    assert_eq!(sketch.add_count(b"x", 4), Ok(()));
+    let before = sketch.clone();
 
-    let decoded = CountMinSketch::<32, 3>::decode(&sketch.encoded()).unwrap_or_default();
+    assert_eq!(sketch.add_count(b"x", 0), Err(Refusal::ZeroCount));
+    assert_eq!(sketch.add_hash_count(7, 0), Err(Refusal::ZeroCount));
+    assert_eq!(sketch, before);
+}
 
-    assert!(decoded.saturated());
-    assert!(!CountMinSketch::<32, 3>::new().saturated());
+// The reference model: exact per-item counts, and the sketch's guarantees
+// checked against them after every call. Every refusal must leave the sketch
+// equal to a clone taken before the call.
+#[test]
+fn a_random_stream_keeps_every_guarantee_and_refusals_change_nothing() {
+    let mut sketch = CountMinSketch::<16, 3>::new();
+    let mut truth = [0_u64; 24];
+    let mut state = 0x2545_F491_4F6C_DD1D_u64;
+    for _ in 0..4_000 {
+        state = mix64(state);
+        let item = usize::from(crate::hash::u64_low_u8(state)) % truth.len();
+        let count = match state >> 60 {
+            0 => 0,
+            1 => u32::MAX / 3,
+            _ => u32::from(crate::hash::u64_low_u16(state >> 16)),
+        };
+        let before = sketch.clone();
+        let bytes = key(u32::from(crate::hash::usize_low_u8(item)));
+        match sketch.add_count(&bytes, count) {
+            Ok(()) => truth[item] += u64::from(count),
+            Err(Refusal::ZeroCount) => {
+                assert_eq!(count, 0);
+                assert_eq!(sketch, before);
+            }
+            Err(refused) => {
+                assert_eq!(refused, Refusal::Overflow);
+                assert_eq!(sketch, before);
+            }
+        }
+        assert_eq!(sketch.total(), truth.iter().sum::<u64>());
+        for (index, &count) in truth.iter().enumerate() {
+            let bytes = key(u32::from(crate::hash::usize_low_u8(index)));
+            assert!(u64::from(sketch.estimate(&bytes)) >= count, "{index}");
+        }
+    }
 }

@@ -2,79 +2,53 @@
 
 use std::cell::RefCell;
 
-use bytes::Bytes;
-use magnus::scan_args::scan_args;
 use magnus::typed_data::Obj;
-use magnus::{Error, RArray, RHash, RModule, RString, Ruby, Value, function, method, prelude::*};
-use probabilistic_machines::TDigest;
+use magnus::{Error, RArray, RModule, RString, Ruby, Value, function, method, prelude::*};
+use probabilistic_machines::{MIN_COMPRESSION, TDigest};
 
-use crate::data::centroid;
-use crate::{Whole, codec_error, optional_kwarg, required_kwarg};
-
-/// Below this the cluster budget is zero, so every point merges into one
-/// centroid and a quantile is meaningless.
-const MIN_COMPRESSION: u16 = 10;
-
-/// The compressions this binding answers for, whether the digest is being built
-/// or read back.
-fn honoured(ruby: &Ruby, compression: u16) -> Result<u16, Error> {
-    if compression < MIN_COMPRESSION {
-        return Err(Error::new(
-            ruby.exception_arg_error(),
-            format!("compression must be at least {MIN_COMPRESSION}, got {compression}"),
-        ));
-    }
-    Ok(compression)
-}
+use crate::data::{centroid, centroid_class};
+use crate::{Whole, answer, decoded_or_refused, define_class};
 
 #[magnus::wrap(class = "ProbabilisticMachines::TDigest", free_immediately, size)]
 struct Wrapper(RefCell<TDigest>);
 
 impl Wrapper {
-    fn new(ruby: &Ruby, args: &[Value]) -> Result<Self, Error> {
-        let args = scan_args::<(), (), (), (), RHash, ()>(args)?;
-        let Whole(compression) = required_kwarg::<Whole<u16>>(args.keywords, "compression")?;
-        Ok(Self(RefCell::new(TDigest::new(honoured(
-            ruby,
-            compression,
-        )?))))
+    /// `TDigest.new(compression)`. `RangeError` where `TDigest::new` answers
+    /// `None`, below [`MIN_COMPRESSION`], or past 65535.
+    fn new(ruby: &Ruby, Whole(compression): Whole<u16>) -> Result<Self, Error> {
+        TDigest::new(compression)
+            .map(|digest| Self(RefCell::new(digest)))
+            .ok_or_else(|| {
+                Error::new(
+                    ruby.exception_range_error(),
+                    format!("compression must be at least {MIN_COMPRESSION}, got {compression}"),
+                )
+            })
     }
 
-    fn load(ruby: &Ruby, blob: Bytes) -> Result<Self, Error> {
-        let digest = TDigest::decode(&blob).map_err(|error| codec_error(ruby, error))?;
-        honoured(ruby, digest.compression())?;
-        Ok(Self(RefCell::new(digest)))
+    /// `TDigest.decode(bytes)`: a digest, or the refusal symbol.
+    fn decode(ruby: &Ruby, bytes: RString) -> Value {
+        let bytes = bytes.to_bytes();
+        decoded_or_refused(
+            ruby,
+            TDigest::decode(&bytes).map(|held| Self(RefCell::new(held))),
+        )
     }
 
     fn compression(&self) -> u16 {
         self.0.borrow().compression()
     }
 
-    fn add(ruby: &Ruby, rb_self: &Self, args: &[Value]) -> Result<(), Error> {
-        let args = scan_args::<(f64,), (), (), (), RHash, ()>(args)?;
-        let (value,) = args.required;
-        let weight: f64 = optional_kwarg(args.keywords, "weight")?.unwrap_or(1.0);
-        if !value.is_finite() {
-            return Err(Error::new(
-                ruby.exception_arg_error(),
-                format!("value must be finite, got {value}"),
-            ));
-        }
-        if !weight.is_finite() || weight <= 0.0 {
-            return Err(Error::new(
-                ruby.exception_arg_error(),
-                format!("weight must be finite and positive, got {weight}"),
-            ));
-        }
-        let count = rb_self.0.borrow().count();
-        if !(count + weight).is_finite() {
-            return Err(Error::new(
-                ruby.exception_arg_error(),
-                format!("weight {weight} overflows the total weight {count}"),
-            ));
-        }
-        rb_self.0.borrow_mut().add_weighted(value, weight);
-        Ok(())
+    fn add(ruby: &Ruby, this: Obj<Self>, value: f64) -> Result<Value, Error> {
+        this.check_frozen()?;
+        let outcome = this.0.borrow_mut().add(value);
+        Ok(answer(ruby, outcome, "added"))
+    }
+
+    fn add_weighted(ruby: &Ruby, this: Obj<Self>, value: f64, weight: f64) -> Result<Value, Error> {
+        this.check_frozen()?;
+        let outcome = this.0.borrow_mut().add_weighted(value, weight);
+        Ok(answer(ruby, outcome, "added"))
     }
 
     fn quantile(&self, q: f64) -> f64 {
@@ -105,33 +79,33 @@ impl Wrapper {
         self.0.borrow().is_empty()
     }
 
-    fn centroids(ruby: &Ruby, rb_self: &Self) -> Result<RArray, Error> {
-        let digest = rb_self.0.borrow();
-        let clusters = ruby.ary_new_capa(digest.len());
-        for cluster in digest.centroids() {
-            clusters.push(centroid(ruby, cluster.mean, cluster.weight)?)?;
+    fn centroids(ruby: &Ruby, this: &Self) -> Result<RArray, Error> {
+        let class = centroid_class(ruby)?;
+        let clusters: Vec<_> = this.0.borrow().centroids().to_vec();
+        let array = ruby.ary_new_capa(clusters.len());
+        for cluster in &clusters {
+            array.push(centroid(class, cluster)?)?;
         }
-        Ok(clusters)
+        Ok(array)
     }
 
-    fn merge(ruby: &Ruby, rb_self: Obj<Self>, other: &Self) -> Result<Obj<Self>, Error> {
+    fn compress(this: Obj<Self>) -> Result<(), Error> {
+        this.check_frozen()?;
+        this.0.borrow_mut().compress();
+        Ok(())
+    }
+
+    /// `:merged`, `:wrong_shape` for a digest of another compression, or
+    /// `:overflow`.
+    fn merge(ruby: &Ruby, this: Obj<Self>, other: &Self) -> Result<Value, Error> {
+        this.check_frozen()?;
         let source = other.0.borrow().clone();
-        let count = rb_self.0.borrow().count();
-        if !(count + source.count()).is_finite() {
-            return Err(Error::new(
-                ruby.exception_arg_error(),
-                format!(
-                    "total weight {} overflows the total weight {count}",
-                    source.count()
-                ),
-            ));
-        }
-        rb_self.0.borrow_mut().merge(&source);
-        Ok(rb_self)
+        let merged = this.0.borrow_mut().merge(&source);
+        Ok(answer(ruby, merged, "merged"))
     }
 
-    fn dump(ruby: &Ruby, rb_self: &Self) -> RString {
-        ruby.str_from_slice(&rb_self.0.borrow().encoded())
+    fn encoded(ruby: &Ruby, this: &Self) -> RString {
+        ruby.str_from_slice(&this.0.borrow().encoded())
     }
 
     fn inspect(&self) -> String {
@@ -146,11 +120,13 @@ impl Wrapper {
 }
 
 pub fn define(ruby: &Ruby, module: RModule) -> Result<(), Error> {
-    let class = module.define_class("TDigest", ruby.class_object())?;
-    class.define_singleton_method("new", function!(Wrapper::new, -1))?;
-    class.define_singleton_method("load", function!(Wrapper::load, 1))?;
+    let class = define_class(ruby, module, "TDigest")?;
+    class.const_set("MIN_COMPRESSION", MIN_COMPRESSION)?;
+    class.define_singleton_method("new", function!(Wrapper::new, 1))?;
+    class.define_singleton_method("decode", function!(Wrapper::decode, 1))?;
     class.define_method("compression", method!(Wrapper::compression, 0))?;
-    class.define_method("add", method!(Wrapper::add, -1))?;
+    class.define_method("add", method!(Wrapper::add, 1))?;
+    class.define_method("add_weighted", method!(Wrapper::add_weighted, 2))?;
     class.define_method("quantile", method!(Wrapper::quantile, 1))?;
     class.define_method("cdf", method!(Wrapper::cdf, 1))?;
     class.define_method("count", method!(Wrapper::count, 0))?;
@@ -159,8 +135,9 @@ pub fn define(ruby: &Ruby, module: RModule) -> Result<(), Error> {
     class.define_method("size", method!(Wrapper::size, 0))?;
     class.define_method("empty?", method!(Wrapper::is_empty, 0))?;
     class.define_method("centroids", method!(Wrapper::centroids, 0))?;
+    class.define_method("compress", method!(Wrapper::compress, 0))?;
     class.define_method("merge", method!(Wrapper::merge, 1))?;
-    class.define_method("dump", method!(Wrapper::dump, 0))?;
+    class.define_method("encoded", method!(Wrapper::encoded, 0))?;
     class.define_method("inspect", method!(Wrapper::inspect, 0))?;
     Ok(())
 }

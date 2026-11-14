@@ -2,13 +2,11 @@
 
 use std::cell::RefCell;
 
-use bytes::Bytes;
-use magnus::scan_args::scan_args;
 use magnus::typed_data::Obj;
-use magnus::{Error, RHash, RModule, RString, Ruby, Value, function, method, prelude::*};
-use probabilistic_machines::{CodecError, HyperLogLog};
+use magnus::{Error, RModule, RString, Ruby, Value, function, method, prelude::*};
+use probabilistic_machines::{HyperLogLog, Refusal};
 
-use crate::{Whole, codec_error, mismatch, required_kwarg, unsupported, unsupported_blob};
+use crate::{Whole, answer, decoded_or_refused, define_class, sizes, unsupported};
 
 /// Register counts [`Sketch`] is monomorphised for.
 const REGISTERS: [usize; 4] = [1024, 4096, 16384, 65536];
@@ -40,7 +38,7 @@ const fn registers_of<const M: usize>(_: &HyperLogLog<M>) -> usize {
     M
 }
 
-fn standard_error_of<const M: usize>(_: &HyperLogLog<M>) -> f64 {
+const fn standard_error_of<const M: usize>(_: &HyperLogLog<M>) -> f64 {
     HyperLogLog::<M>::standard_error()
 }
 
@@ -52,52 +50,66 @@ fn boxed_new<const N: usize>() -> Box<HyperLogLog<N>> {
 }
 
 #[inline(never)]
-fn boxed_decode<const N: usize>(ruby: &Ruby, frame: &[u8]) -> Result<Box<HyperLogLog<N>>, Error> {
+fn boxed_decode<const N: usize>(frame: &[u8]) -> Result<Box<HyperLogLog<N>>, Refusal> {
     let mut sketch = boxed_new::<N>();
-    sketch
-        .decode_into(frame)
-        .map_err(|error| codec_error(ruby, error))?;
+    sketch.decode_into(frame)?;
     Ok(sketch)
 }
 
+/// The sketch a frame holds. A precision this build does not carry is read
+/// as the smallest shape it does, which answers exactly what the core answers
+/// a type of another shape: `Truncated`, `WrongStructure` or `WrongShape`.
+fn decoded(frame: &[u8]) -> Result<Sketch, Refusal> {
+    Ok(match frame.get(1) {
+        Some(12) => Sketch::M4096(boxed_decode(frame)?),
+        Some(14) => Sketch::M16384(boxed_decode(frame)?),
+        Some(16) => Sketch::M65536(boxed_decode(frame)?),
+        Some(_) | None => Sketch::M1024(boxed_decode(frame)?),
+    })
+}
+
 impl Wrapper {
-    fn new(ruby: &Ruby, args: &[Value]) -> Result<Self, Error> {
-        let args = scan_args::<(), (), (), (), RHash, ()>(args)?;
-        let Whole(registers): Whole<usize> = required_kwarg(args.keywords, "registers")?;
+    /// `HyperLogLog.new(registers)`. `RangeError` outside [`REGISTERS`].
+    fn new(ruby: &Ruby, Whole(registers): Whole<usize>) -> Result<Self, Error> {
         let sketch = match registers {
-            1024 => Sketch::M1024(boxed_new::<1024>()),
-            4096 => Sketch::M4096(boxed_new::<4096>()),
-            16384 => Sketch::M16384(boxed_new::<16384>()),
-            65536 => Sketch::M65536(boxed_new::<65536>()),
+            1024 => Sketch::M1024(boxed_new()),
+            4096 => Sketch::M4096(boxed_new()),
+            16384 => Sketch::M16384(boxed_new()),
+            65536 => Sketch::M65536(boxed_new()),
             _ => return Err(unsupported(ruby, "registers", registers, &REGISTERS)),
         };
         Ok(Self(RefCell::new(sketch)))
     }
 
-    fn load(ruby: &Ruby, blob: Bytes) -> Result<Self, Error> {
-        let Some(&precision) = blob.get(1) else {
-            return Err(codec_error(ruby, CodecError::Truncated));
-        };
-        let sketch = match precision {
-            10 => Sketch::M1024(boxed_decode::<1024>(ruby, &blob)?),
-            12 => Sketch::M4096(boxed_decode::<4096>(ruby, &blob)?),
-            14 => Sketch::M16384(boxed_decode::<16384>(ruby, &blob)?),
-            16 => Sketch::M65536(boxed_decode::<65536>(ruby, &blob)?),
-            _ => return Err(unsupported_blob(ruby, "register count", &REGISTERS)),
-        };
-        Ok(Self(RefCell::new(sketch)))
+    /// `HyperLogLog.decode(bytes)`: a sketch, or the refusal symbol.
+    fn decode(ruby: &Ruby, bytes: RString) -> Value {
+        let bytes = bytes.to_bytes();
+        decoded_or_refused(ruby, decoded(&bytes).map(|held| Self(RefCell::new(held))))
+    }
+
+    fn decode_into(ruby: &Ruby, this: Obj<Self>, bytes: RString) -> Result<Value, Error> {
+        let bytes = bytes.to_bytes();
+        this.check_frozen()?;
+        let outcome = sketch!(&mut *this.0.borrow_mut(), |sketch| sketch
+            .decode_into(&bytes));
+        Ok(answer(ruby, outcome, "decoded"))
     }
 
     fn registers(&self) -> usize {
         sketch!(&*self.0.borrow(), |sketch| registers_of(&**sketch))
     }
 
-    fn add(&self, item: Bytes) {
-        sketch!(&mut *self.0.borrow_mut(), |sketch| sketch.add(&item));
+    fn add(this: Obj<Self>, item: RString) -> Result<(), Error> {
+        let item = item.to_bytes();
+        this.check_frozen()?;
+        sketch!(&mut *this.0.borrow_mut(), |sketch| sketch.add(&item));
+        Ok(())
     }
 
-    fn add_hash(&self, Whole(hash): Whole<u64>) {
-        sketch!(&mut *self.0.borrow_mut(), |sketch| sketch.add_hash(hash));
+    fn add_hash(this: Obj<Self>, Whole(hash): Whole<u64>) -> Result<(), Error> {
+        this.check_frozen()?;
+        sketch!(&mut *this.0.borrow_mut(), |sketch| sketch.add_hash(hash));
+        Ok(())
     }
 
     fn estimate(&self) -> f64 {
@@ -112,20 +124,38 @@ impl Wrapper {
         sketch!(&*self.0.borrow(), |sketch| sketch.is_empty())
     }
 
-    fn merge(ruby: &Ruby, rb_self: Obj<Self>, other: &Self) -> Result<Obj<Self>, Error> {
+    /// `:merged`, or `:wrong_shape` for a sketch of another register count
+    /// (in Rust that merge does not compile).
+    fn merge(ruby: &Ruby, this: Obj<Self>, other: &Self) -> Result<Value, Error> {
+        this.check_frozen()?;
         let source = other.0.borrow().clone();
-        match (&mut *rb_self.0.borrow_mut(), &source) {
-            (Sketch::M1024(target), Sketch::M1024(source)) => target.merge(source),
-            (Sketch::M4096(target), Sketch::M4096(source)) => target.merge(source),
-            (Sketch::M16384(target), Sketch::M16384(source)) => target.merge(source),
-            (Sketch::M65536(target), Sketch::M65536(source)) => target.merge(source),
-            _ => return Err(mismatch(ruby, "sketch")),
-        }
-        Ok(rb_self)
+        let merged = match (&mut *this.0.borrow_mut(), &source) {
+            (Sketch::M1024(target), Sketch::M1024(source)) => {
+                target.merge(source);
+                Ok(())
+            }
+            (Sketch::M4096(target), Sketch::M4096(source)) => {
+                target.merge(source);
+                Ok(())
+            }
+            (Sketch::M16384(target), Sketch::M16384(source)) => {
+                target.merge(source);
+                Ok(())
+            }
+            (Sketch::M65536(target), Sketch::M65536(source)) => {
+                target.merge(source);
+                Ok(())
+            }
+            (
+                Sketch::M1024(_) | Sketch::M4096(_) | Sketch::M16384(_) | Sketch::M65536(_),
+                Sketch::M1024(_) | Sketch::M4096(_) | Sketch::M16384(_) | Sketch::M65536(_),
+            ) => Err(Refusal::WrongShape),
+        };
+        Ok(answer(ruby, merged, "merged"))
     }
 
-    fn dump(ruby: &Ruby, rb_self: &Self) -> RString {
-        let frame = sketch!(&*rb_self.0.borrow(), |sketch| sketch.encoded());
+    fn encoded(ruby: &Ruby, this: &Self) -> RString {
+        let frame = sketch!(&*this.0.borrow(), |sketch| sketch.encoded());
         ruby.str_from_slice(&frame)
     }
 
@@ -139,9 +169,11 @@ impl Wrapper {
 }
 
 pub fn define(ruby: &Ruby, module: RModule) -> Result<(), Error> {
-    let class = module.define_class("HyperLogLog", ruby.class_object())?;
-    class.define_singleton_method("new", function!(Wrapper::new, -1))?;
-    class.define_singleton_method("load", function!(Wrapper::load, 1))?;
+    let class = define_class(ruby, module, "HyperLogLog")?;
+    class.const_set("REGISTERS", sizes(ruby, &REGISTERS))?;
+    class.define_singleton_method("new", function!(Wrapper::new, 1))?;
+    class.define_singleton_method("decode", function!(Wrapper::decode, 1))?;
+    class.define_method("decode_into", method!(Wrapper::decode_into, 1))?;
     class.define_method("registers", method!(Wrapper::registers, 0))?;
     class.define_method("add", method!(Wrapper::add, 1))?;
     class.define_method("add_hash", method!(Wrapper::add_hash, 1))?;
@@ -149,7 +181,7 @@ pub fn define(ruby: &Ruby, module: RModule) -> Result<(), Error> {
     class.define_method("standard_error", method!(Wrapper::standard_error, 0))?;
     class.define_method("empty?", method!(Wrapper::is_empty, 0))?;
     class.define_method("merge", method!(Wrapper::merge, 1))?;
-    class.define_method("dump", method!(Wrapper::dump, 0))?;
+    class.define_method("encoded", method!(Wrapper::encoded, 0))?;
     class.define_method("inspect", method!(Wrapper::inspect, 0))?;
     Ok(())
 }

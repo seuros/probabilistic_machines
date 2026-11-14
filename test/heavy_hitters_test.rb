@@ -4,28 +4,26 @@ require 'test_helper'
 
 module ProbabilisticMachines
   class HeavyHittersTest < Minitest::Test
-    def test_every_supported_counter_count_is_monomorphised
-      [16, 64, 256].each do |counters|
-        assert_equal counters, HeavyHitters.new(k: counters).k
+    def test_exactly_the_supported_counter_counts_are_monomorphised
+      assert_equal [16, 64, 256], HeavyHitters::COUNTERS
+      HeavyHitters::COUNTERS.each do |counters|
+        assert_equal counters, HeavyHitters.new(counters).counters
       end
-    end
 
-    def test_an_unsupported_counter_count_is_rejected
       [1, 32, 128, 1024].each do |counters|
-        assert_raises(ArgumentError) { HeavyHitters.new(k: counters) }
+        assert_raises(RangeError) { HeavyHitters.new(counters) }
       end
-      assert_raises(ArgumentError) { HeavyHitters.new }
     end
 
     def test_the_dominant_key_is_tracked_with_its_own_string
-      table = HeavyHitters.new(k: 16)
-      5_000.times { |id| table.add("ip-#{id}") }
-      1_000.times { table.add('ip-hot', count: 2) }
+      table = HeavyHitters.new(16)
+      5_000.times { |id| assert_equal :added, table.add("ip-#{id}") }
+      1_000.times { assert_equal :added, table.add_count('ip-hot', 2) }
 
       assert_equal 7_000, table.observed
       assert_equal 16, table.size
 
-      top = table.top(1).first
+      top = table.top
 
       assert_instance_of Hitter, top
       assert_predicate top, :frozen?
@@ -34,105 +32,142 @@ module ProbabilisticMachines
       assert_operator top.count - top.overestimate, :<=, 2_000
     end
 
-    def test_a_key_is_tracked_once_it_beats_the_counter_share
-      table = HeavyHitters.new(k: 64)
-      10_000.times { |id| table.add("ip-#{id % 1_000}") }
-      300.times { table.add('ip-frequent') }
+    def test_an_empty_table_has_no_top_and_an_untracked_key_counts_zero
+      table = HeavyHitters.new(16)
 
-      assert_operator 300, :>, table.observed / 64
-
-      tracked = table.ranked.find { |hitter| hitter.key == 'ip-frequent' }
-
-      refute_nil tracked
-      assert_operator tracked.count, :>=, 300
-      assert_operator tracked.count - tracked.overestimate, :<=, 300
+      assert_nil table.top
+      assert_empty table.ranked
+      assert_empty table.hitters
+      assert_equal 0, table.count('ip-1')
     end
 
-    def test_an_untracked_key_counts_zero
-      assert_equal 0, HeavyHitters.new(k: 16).count('ip-1')
-    end
+    def test_ranked_is_ordered_and_hitters_hold_the_same_keys
+      table = HeavyHitters.new(64)
+      %w[a b c].each_with_index { |key, index| table.add_count(key, 10 - index) }
 
-    def test_top_is_ordered_and_bounded_by_the_request
-      table = HeavyHitters.new(k: 64)
-      %w[a b c].each_with_index { |key, index| table.add(key, count: 10 - index) }
-
-      assert_equal %w[a b c], table.top(5).map(&:key)
-      assert_equal %w[a b], table.top(2).map(&:key)
-      assert_equal 3, table.ranked.size
+      assert_equal %w[a b c], table.ranked.map(&:key)
+      assert_equal %w[a b c], table.hitters.map(&:key).sort
+      assert_equal Hitter.new('a', 10, 0), table.top
     end
 
     def test_names_survive_eviction_churn
-      table = HeavyHitters.new(k: 16)
+      table = HeavyHitters.new(16)
       5_000.times { |id| table.add("ip-#{id}") }
 
       assert_equal 16, table.ranked.size
       table.ranked.each { |hitter| assert_match(/\Aip-\d+\z/, hitter.key) }
     end
 
+    def test_a_zero_count_is_refused_and_evicts_nothing
+      table = HeavyHitters.new(16)
+      16.times { |id| table.add("ip-#{id}") }
+      before = table.encoded
+
+      assert_equal :zero_count, table.add_count('ip-new', 0)
+      assert_equal before, table.encoded
+      assert_equal 0, table.count('ip-new')
+    end
+
+    def test_an_overflowing_count_is_refused_and_changes_nothing
+      table = HeavyHitters.new(16)
+      table.add_count('ip-1', (2**64) - 1)
+      before = table.encoded
+
+      assert_equal :overflow, table.add('ip-1')
+      assert_equal :overflow, table.add('ip-2')
+      assert_equal before, table.encoded
+      assert_raises(RangeError) { table.add_count('ip-1', 2**64) }
+    end
+
     def test_merge_folds_both_tables
-      left = HeavyHitters.new(k: 16)
-      right = HeavyHitters.new(k: 16)
-      100.times { left.add('ip-1') }
-      50.times { right.add('ip-2') }
+      left = HeavyHitters.new(16)
+      right = HeavyHitters.new(16)
+      left.add_count('ip-1', 100)
+      right.add_count('ip-2', 50)
 
-      assert_same left, left.merge(right)
+      assert_equal :merged, left.merge(right)
       assert_equal 150, left.observed
-      assert_equal 100, left.count('ip-1')
-      assert_equal 50, left.count('ip-2')
-      assert_equal %w[ip-1 ip-2], left.top(2).map(&:key)
+      assert_equal %w[ip-1 ip-2], left.ranked.map(&:key)
     end
 
-    def test_dump_load_round_trips_with_the_original_keys
-      table = HeavyHitters.new(k: 16)
-      5_000.times { |id| table.add("ip-#{id}") }
-      1_000.times { table.add('ip-hot', count: 2) }
-      blob = table.dump
+    def test_merge_refusals_change_nothing
+      table = HeavyHitters.new(16)
+      table.add_count('ip-1', (2**64) - 1)
+      before = table.encoded
+      other = HeavyHitters.new(16)
+      other.add('ip-1')
 
-      assert_equal Encoding::BINARY, blob.encoding
-      assert_equal 13 + (16 * 24), HeavyHitters.new(k: 16).dump.bytesize
-
-      restored = HeavyHitters.load(blob)
-
-      assert_equal [16, table.observed, table.size], [restored.k, restored.observed, restored.size]
-      assert_equal table.ranked.map(&:key), restored.ranked.map(&:key)
-      assert_equal table.ranked.map(&:count), restored.ranked.map(&:count)
-      assert_equal table.ranked.map(&:overestimate), restored.ranked.map(&:overestimate)
-      assert_equal table.count('ip-hot'), restored.count('ip-hot')
-    end
-
-    def test_load_rejects_a_blob_it_did_not_write
-      assert_raises(ArgumentError) { HeavyHitters.load('') }
-      assert_raises(ArgumentError) { HeavyHitters.load(HyperLogLog.new(registers: 1024).dump) }
-      assert_raises(ArgumentError) { HeavyHitters.load("\xb1\x20\x00".b + ("\x00".b * 800)) }
-
-      blob = HeavyHitters.new(k: 16).dump
-
-      assert_raises(ArgumentError) { HeavyHitters.load(blob.byteslice(0, 100)) }
-    end
-
-    def test_load_rejects_a_blob_whose_keys_went_missing
-      table = HeavyHitters.new(k: 16)
-      table.add('ip-1')
-
-      assert_raises(ArgumentError) { HeavyHitters.load(table.dump.byteslice(0, 13 + (16 * 24))) }
-    end
-
-    def test_merge_rejects_another_counter_count
-      assert_raises(ArgumentError) { HeavyHitters.new(k: 16).merge(HeavyHitters.new(k: 64)) }
+      assert_equal :overflow, table.merge(other)
+      assert_equal :wrong_shape, table.merge(HeavyHitters.new(64))
+      assert_equal before, table.encoded
     end
 
     def test_merge_with_the_receiver_doubles_the_counts
-      table = HeavyHitters.new(k: 16)
-      10.times { table.add('ip-1') }
+      table = HeavyHitters.new(16)
+      table.add_count('ip-1', 10)
 
-      table.merge(table)
-
+      assert_equal :merged, table.merge(table)
       assert_equal 20, table.observed
       assert_equal 20, table.count('ip-1')
     end
 
+    def test_encoded_decode_round_trips_with_the_original_keys
+      table = HeavyHitters.new(16)
+      5_000.times { |id| table.add("ip-#{id}") }
+      1_000.times { table.add_count('ip-hot', 2) }
+      blob = table.encoded
+
+      assert_equal Encoding::BINARY, blob.encoding
+      assert_equal 13 + (16 * 24), HeavyHitters.new(16).encoded.bytesize
+
+      restored = HeavyHitters.decode(blob)
+
+      assert_equal [16, table.observed, table.size], [restored.counters, restored.observed, restored.size]
+      assert_equal table.ranked, restored.ranked
+    end
+
+    def test_decode_answers_refusal_symbols
+      assert_equal :truncated, HeavyHitters.decode('')
+      assert_equal :wrong_structure, HeavyHitters.decode("\xa1".b * 800)
+      assert_equal :wrong_shape, HeavyHitters.decode("\xb1\x20\x00".b + ("\x00".b * 800))
+
+      table = HeavyHitters.new(16)
+      table.add('ip-1')
+      frame = table.encoded
+
+      assert_equal :malformed, HeavyHitters.decode(frame.byteslice(0, 13 + (16 * 24))), 'a key went missing'
+      assert_equal :malformed, HeavyHitters.decode("#{frame}\x01".b), 'a record cut short'
+    end
+
+    def test_decode_into_replaces_table_and_names_or_changes_nothing
+      table = HeavyHitters.new(16)
+      table.add('mine')
+      source = HeavyHitters.new(16)
+      source.add_count('theirs', 3)
+      before = table.encoded
+
+      assert_equal :wrong_shape, table.decode_into(HeavyHitters.new(64).encoded)
+      assert_equal :malformed, table.decode_into(source.encoded.byteslice(0, 13 + (16 * 24)))
+      assert_equal before, table.encoded
+
+      assert_equal :decoded, table.decode_into(source.encoded)
+      assert_equal [Hitter.new('theirs', 3, 0)], table.ranked
+    end
+
+    # A key whose bytes are not UTF-8 is a value out of range, not an
+    # encoding problem: RangeError, from `add`, `add_count`, `count` and
+    # `Hitter.new` alike. Its encoding tag does not matter, its bytes do.
     def test_a_key_that_is_not_utf_8_is_rejected
-      assert_raises(EncodingError) { HeavyHitters.new(k: 16).add("\xff\xfe".b) }
+      table = HeavyHitters.new(16)
+
+      assert_raises(RangeError) { table.add("\xff\xfe".b) }
+      assert_raises(RangeError) { table.add_count("\xff".b, 2) }
+      assert_raises(RangeError) { table.count("\xff".b) }
+      assert_raises(RangeError) { Hitter.new("\xff".b, 2, 1) }
+      assert_raises(TypeError) { table.add(:key) }
+      assert_equal 0, table.observed
+      assert_equal :added, table.add('abc'.b)
+      assert_equal 1, table.count('abc')
     end
   end
 end

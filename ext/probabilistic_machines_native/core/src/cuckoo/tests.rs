@@ -1,5 +1,5 @@
-use super::{CuckooFilter, Full};
-use crate::CodecError;
+use super::{CuckooFilter, Removing};
+use crate::Refusal;
 use crate::hash::mix64;
 
 fn key(index: u32) -> [u8; 8] {
@@ -25,12 +25,41 @@ fn removal_forgets_exactly_one_copy() {
     assert_eq!(filter.insert(b"serial-1"), Ok(()));
     assert_eq!(filter.len(), 2);
 
-    assert!(filter.remove(b"serial-1"));
+    assert_eq!(filter.remove(b"serial-1"), Removing::Cleared);
     assert!(filter.contains(b"serial-1"));
-    assert!(filter.remove(b"serial-1"));
+    assert_eq!(filter.remove(b"serial-1"), Removing::Cleared);
     assert!(!filter.contains(b"serial-1"));
     assert!(filter.is_empty());
-    assert!(!filter.remove(b"serial-1"));
+}
+
+// Removing an item whose fingerprint is in neither bucket is an honoured
+// repeat the filter can prove (no false negatives): it changes nothing.
+#[test]
+fn removing_what_is_not_held_is_honoured_and_changes_nothing() {
+    let mut filter = CuckooFilter::<256>::new();
+    assert_eq!(filter.insert(b"serial-1"), Ok(()));
+    assert_eq!(filter.remove(b"serial-1"), Removing::Cleared);
+    let before = filter.clone();
+
+    assert_eq!(filter.remove(b"serial-1"), Removing::NotHeld);
+    assert_eq!(filter.remove_hash(42), Removing::NotHeld);
+    assert_eq!(filter, before);
+}
+
+// The documented caveat: a never-inserted item that shares a fingerprint and a
+// bucket with a stored one is cleared in its place, and the stored item is then
+// denied. Cleared is not proof of membership.
+#[test]
+fn clearing_a_colliding_item_takes_the_stored_fingerprint() {
+    let mut filter = CuckooFilter::<2>::new();
+    assert_eq!(filter.insert_hash(0), Ok(()));
+    let collider = (1..u64::MAX)
+        .find(|&hash| hash != 0 && filter.contains_hash(hash))
+        .unwrap_or(0);
+    assert_ne!(collider, 0);
+
+    assert_eq!(filter.remove_hash(collider), Removing::Cleared);
+    assert!(!filter.contains_hash(0));
 }
 
 #[test]
@@ -67,7 +96,9 @@ fn a_failed_insert_leaves_every_other_item_in_place() {
         CuckooFilter::<64>::CAPACITY
     );
 
-    assert_eq!(filter.insert(&key(next)), Err(Full));
+    let before = filter.clone();
+    assert_eq!(filter.insert(&key(next)), Err(Refusal::Full));
+    assert_eq!(filter, before);
     assert_eq!(filter.len(), stored);
     for index in 0..next {
         assert!(filter.contains(&key(index)), "{index}");
@@ -99,23 +130,55 @@ fn frames_round_trip_and_reject_foreign_bytes() {
     assert_eq!(CuckooFilter::<128>::decode(&frame), Ok(filter.clone()));
 
     let short = frame.len() - 1;
-    assert_eq!(
-        filter.encode(&mut frame[..short]),
-        Err(CodecError::Truncated)
-    );
+    assert_eq!(filter.encode(&mut frame[..short]), Err(Refusal::Truncated));
     assert_eq!(
         CuckooFilter::<128>::decode(&frame[..short]),
-        Err(CodecError::Truncated)
+        Err(Refusal::Truncated)
     );
 
     let mut wrong = frame;
     wrong[0] = 0x00;
-    assert_eq!(CuckooFilter::<128>::decode(&wrong), Err(CodecError::Tag));
+    assert_eq!(
+        CuckooFilter::<128>::decode(&wrong),
+        Err(Refusal::WrongStructure)
+    );
 
     let mut lying = frame;
     lying[1] = 3;
     assert_eq!(
         CuckooFilter::<128>::decode(&lying),
-        Err(CodecError::Parameters)
+        Err(Refusal::WrongShape)
     );
+}
+
+// The reference model: a multiset of hashes. Every inserted hash is found,
+// the stored count matches the model, and a refused insert leaves the filter
+// equal to a clone taken before it.
+#[test]
+fn a_random_workload_keeps_every_item_and_refusals_change_nothing() {
+    let mut filter = CuckooFilter::<16>::new();
+    let mut held = std::vec::Vec::new();
+    let mut state = 0x9E37_79B9_7F4A_7C15_u64;
+    for _ in 0..3_000 {
+        state = mix64(state);
+        let hash = mix64(state % 97);
+        if state >> 62 == 0 && !held.is_empty() {
+            let at = usize::from(crate::hash::u64_low_u16(state >> 8)) % held.len();
+            let hash = held.swap_remove(at);
+            assert_eq!(filter.remove_hash(hash), Removing::Cleared);
+        } else {
+            let before = filter.clone();
+            match filter.insert_hash(hash) {
+                Ok(()) => held.push(hash),
+                Err(refused) => {
+                    assert_eq!(refused, Refusal::Full);
+                    assert_eq!(filter, before);
+                }
+            }
+        }
+        assert_eq!(filter.len(), held.len());
+        for &hash in &held {
+            assert!(filter.contains_hash(hash));
+        }
+    }
 }

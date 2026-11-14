@@ -68,7 +68,12 @@ task :clippy do
      '--all-targets', '--', '-D', 'warnings'
 end
 
+desc 'Validate the RBS signatures'
+task :rbs do
+  sh 'rbs', '-I', 'sig', 'validate'
+end
+
 task test: :compile
-task default: %i[test cargo]
+task default: %i[test rbs cargo]
 
 Dir[File.join(__dir__, 'tasks/*.rake')].sort.each { |f| load f }

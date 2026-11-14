@@ -1,10 +1,11 @@
 //! Distinct-count estimation in a fixed array of registers.
 
 use crate::hash::{hash64, u32_low_u8, u64_low_u16};
-use crate::{CodecError, TAG_HYPERLOGLOG, encode_frame, open_frame};
+use crate::{Refusal, TAG_HYPERLOGLOG, open_frame};
+use sliderule_machines::ln_ratio;
 
-/// Odd terms of `2 * atanh(t) = ln((1 + t) / (1 - t))`, in Horner order.
-const ATANH_COEFFICIENTS: [f64; 5] = [2.0, 2.0 / 3.0, 0.4, 2.0 / 7.0, 2.0 / 9.0];
+/// Fraction bits the linear-counting logarithm is taken with.
+const LN_BITS: u32 = sliderule_machines::MAX_FRACTION_BITS;
 
 /// Bits of hash a sketch splits into a register index and a leading-zero count.
 const HASH_BITS: u32 = 64;
@@ -26,6 +27,10 @@ const POW2_NEG: [f64; 65] = {
 /// registers give 3.25%, 4096 give 1.63%, 16384 give 0.81%. A register holds a
 /// leading-zero count, which fits in a byte, so the sketch is `M` bytes on the
 /// stack and never touches a heap.
+///
+/// Nothing here can refuse: [`add`](Self::add) and [`merge`](Self::merge) only
+/// raise registers, so both are idempotent and neither has a limit to hit.
+/// Only the codec answers a [`Refusal`].
 ///
 /// ```
 /// use probabilistic_machines::HyperLogLog;
@@ -66,10 +71,17 @@ impl<const M: usize> HyperLogLog<M> {
     }
 
     /// Relative standard error of the estimate, `1.04 / sqrt(M)`.
-    #[cfg(feature = "std")]
+    ///
+    /// `M` is a power of two, so the root is a power of two as well, times
+    /// `sqrt(2)` when the precision is odd: no `std` square root is needed.
     #[must_use]
-    pub fn standard_error() -> f64 {
-        1.04 / f64::from(1_u32 << Self::PRECISION).sqrt()
+    pub const fn standard_error() -> f64 {
+        let halved = 1.04 * POW2_NEG[(Self::PRECISION / 2) as usize];
+        if Self::PRECISION % 2 == 1 {
+            halved * core::f64::consts::FRAC_1_SQRT_2
+        } else {
+            halved
+        }
     }
 
     pub fn add(&mut self, item: &[u8]) {
@@ -96,6 +108,13 @@ impl<const M: usize> HyperLogLog<M> {
     /// Under `2.5 * M` the register histogram is sparse enough that linear
     /// counting over the untouched registers beats the harmonic-mean
     /// estimator, so this switches to it.
+    ///
+    /// Linear counting is `M * ln(M / untouched)` over two integers, taken
+    /// with `sliderule_machines::ln_ratio` at 58 fraction bits: the logarithm
+    /// is within `3 * 2^-58` of the exact one before its one rounding to an
+    /// `f64`, and involves no floating-point series, so the same registers
+    /// give the same bits on every target. The harmonic-mean branch is sums,
+    /// products and one division of `f64`s, each correctly rounded by IEEE 754.
     #[must_use]
     pub fn estimate(&self) -> f64 {
         let mut histogram = [0_u32; 65];
@@ -122,7 +141,7 @@ impl<const M: usize> HyperLogLog<M> {
         let untouched = f64::from(histogram[0]);
 
         if untouched > 0.0 && raw <= 2.5 * registers {
-            registers * ln(registers / untouched)
+            linear_count(Self::PRECISION, histogram[0])
         } else {
             raw
         }
@@ -138,22 +157,7 @@ impl<const M: usize> HyperLogLog<M> {
         }
     }
 
-    /// Writes the sketch into `out`, returning the number of bytes written.
-    ///
-    /// # Errors
-    ///
-    /// [`CodecError::Truncated`] when `out` is shorter than
-    /// [`ENCODED_LEN`](Self::ENCODED_LEN).
-    pub fn encode(&self, out: &mut [u8]) -> Result<usize, CodecError> {
-        encode_frame(out, Self::ENCODED_LEN, |frame| self.write_frame(frame))
-    }
-
-    /// The sketch's frame, exactly [`ENCODED_LEN`](Self::ENCODED_LEN) bytes.
-    #[cfg(feature = "alloc")]
-    #[must_use]
-    pub fn encoded(&self) -> alloc::boxed::Box<[u8]> {
-        crate::encoded_frame(Self::ENCODED_LEN, |frame| self.write_frame(frame))
-    }
+    encoders!("sketch");
 
     /// Fills a frame of exactly [`ENCODED_LEN`](Self::ENCODED_LEN) bytes.
     fn write_frame(&self, frame: &mut [u8]) {
@@ -166,11 +170,11 @@ impl<const M: usize> HyperLogLog<M> {
     ///
     /// # Errors
     ///
-    /// [`CodecError::Truncated`] when `bytes` is too short, [`CodecError::Tag`]
-    /// when it holds another structure, [`CodecError::Parameters`] when it was
-    /// written with a different register count or holds a rank the hash tail
-    /// its precision leaves cannot reach.
-    pub fn decode(bytes: &[u8]) -> Result<Self, CodecError> {
+    /// [`Refusal::Truncated`] when `bytes` is too short, [`Refusal::WrongStructure`]
+    /// when it holds another structure, [`Refusal::WrongShape`] when it was
+    /// written with a different register count, [`Refusal::Malformed`] when
+    /// it holds a rank the hash tail its precision leaves cannot reach.
+    pub fn decode(bytes: &[u8]) -> Result<Self, Refusal> {
         let mut sketch = Self::new();
         sketch.decode_into(bytes)?;
         Ok(sketch)
@@ -184,15 +188,15 @@ impl<const M: usize> HyperLogLog<M> {
     /// # Errors
     ///
     /// The same as [`decode`](Self::decode).
-    pub fn decode_into(&mut self, bytes: &[u8]) -> Result<(), CodecError> {
+    pub fn decode_into(&mut self, bytes: &[u8]) -> Result<(), Refusal> {
         let frame = open_frame(bytes, Self::ENCODED_LEN, TAG_HYPERLOGLOG)?;
         if frame[1] != u32_low_u8(Self::PRECISION) {
-            return Err(CodecError::Parameters);
+            return Err(Refusal::WrongShape);
         }
         let mut index = 0;
         while index < M {
             if frame[2 + index] > Self::MAX_RANK {
-                return Err(CodecError::Parameters);
+                return Err(Refusal::Malformed);
             }
             index += 1;
         }
@@ -214,29 +218,31 @@ const fn rank(hash: u64, precision: u32) -> u8 {
     u32_low_u8(tail.leading_zeros() + 1)
 }
 
-/// Natural logarithm of a positive finite `x`, accurate to a few parts in
-/// `10^10`. `f64::ln` lives in `std`, and the linear-counting branch needs this
-/// on bare metal.
-fn ln(x: f64) -> f64 {
-    let bits = x.to_bits();
-    let mut mantissa = f64::from_bits((bits & 0x000F_FFFF_FFFF_FFFF) | 0x3FF0_0000_0000_0000);
-    let mut exponent = f64::from(u64_low_u16((bits >> 52) & 0x7FF)) - 1023.0;
-    if mantissa > core::f64::consts::SQRT_2 {
-        mantissa *= 0.5;
-        exponent += 1.0;
-    }
-
-    let t = (mantissa - 1.0) / (mantissa + 1.0);
-    let square = t * t;
-    let mut series = 0.0;
-    for coefficient in ATANH_COEFFICIENTS.iter().rev() {
-        let higher = series * square;
-        series = coefficient + higher;
-    }
-
-    let scaled = exponent * core::f64::consts::LN_2;
-    let odd = series * t;
-    scaled + odd
+/// `M * ln(M / untouched)` for `M = 2^precision` registers of which
+/// `untouched` (`1..=M`) still hold zero.
+///
+/// `ln_ratio` answers an interval around the exact `ln(M) - ln(untouched)`:
+/// each factor's logarithm falls short by less than `3 * 2^-58`, so the
+/// working value sits within `3 * 2^-58` of the exact one and the interval is
+/// that value widened by three units on each side. Its midpoint is the
+/// working value, at most `3 * 2^-58` off.
+///
+/// The ratio is at least one, so the midpoint is never negative, and below
+/// `ln(65536) * 2^58 < 2^62`, so its low 64 bits are all of it. Those split
+/// into two `u32` halves that convert to `f64` exactly; their sum rounds once
+/// (relative `2^-53`), and scaling by `2^-58` and by the power of two `M` is
+/// exact. The result is within `M * (ln(M / untouched) * 2^-53 + 3 * 2^-58)`
+/// of the real value: under `10^-10` items at 65536 registers, against a
+/// documented error of `1.04 / sqrt(M)` of the estimate.
+fn linear_count(precision: u32, untouched: u32) -> f64 {
+    let registers = 1_u64 << precision;
+    let ln = ln_ratio::<LN_BITS>(&[registers], &[u64::from(untouched)]);
+    let midpoint = i128::midpoint(ln.lo, ln.hi).max(0).cast_unsigned();
+    let [b0, b1, b2, b3, b4, b5, b6, b7, ..] = midpoint.to_le_bytes();
+    let low = f64::from(u32::from_le_bytes([b0, b1, b2, b3]));
+    let high = f64::from(u32::from_le_bytes([b4, b5, b6, b7]));
+    let scaled = (high * 4_294_967_296.0 + low) * POW2_NEG[LN_BITS as usize];
+    scaled * f64::from(1_u32 << precision)
 }
 
 #[cfg(test)]

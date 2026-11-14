@@ -1,5 +1,5 @@
-use super::{HyperLogLog, ln};
-use crate::CodecError;
+use super::{HyperLogLog, linear_count};
+use crate::Refusal;
 use crate::hash::mix64;
 
 fn fill<const M: usize>(sketch: &mut HyperLogLog<M>, range: core::ops::Range<u32>) {
@@ -8,12 +8,10 @@ fn fill<const M: usize>(sketch: &mut HyperLogLog<M>, range: core::ops::Range<u32
     }
 }
 
-#[cfg(feature = "std")]
 fn relative_error(estimate: f64, truth: f64) -> f64 {
     (estimate - truth).abs() / truth
 }
 
-#[cfg(feature = "std")]
 #[test]
 fn estimates_land_inside_three_standard_errors() {
     let tolerance = 3.0 * HyperLogLog::<4096>::standard_error();
@@ -26,7 +24,6 @@ fn estimates_land_inside_three_standard_errors() {
     }
 }
 
-#[cfg(feature = "std")]
 #[test]
 fn small_cardinalities_fall_back_to_linear_counting() {
     for &truth in &[1_u32, 7, 50, 100] {
@@ -41,7 +38,6 @@ fn small_cardinalities_fall_back_to_linear_counting() {
     }
 }
 
-#[cfg(feature = "std")]
 #[test]
 fn the_switch_between_estimators_leaves_no_discontinuity() {
     let tolerance = 3.0 * HyperLogLog::<1024>::standard_error();
@@ -137,20 +133,20 @@ fn frames_round_trip_and_reject_foreign_bytes() {
 
     assert_eq!(
         HyperLogLog::<64>::decode(&frame[..65]),
-        Err(CodecError::Truncated)
+        Err(Refusal::Truncated)
     );
-    assert_eq!(sketch.encode(&mut frame[..65]), Err(CodecError::Truncated));
+    assert_eq!(sketch.encode(&mut frame[..65]), Err(Refusal::Truncated));
 
     let mut wrong = frame;
     wrong[0] = 0x00;
-    assert_eq!(HyperLogLog::<64>::decode(&wrong), Err(CodecError::Tag));
+    assert_eq!(
+        HyperLogLog::<64>::decode(&wrong),
+        Err(Refusal::WrongStructure)
+    );
 
     let mut lying = frame;
     lying[1] = 9;
-    assert_eq!(
-        HyperLogLog::<64>::decode(&lying),
-        Err(CodecError::Parameters)
-    );
+    assert_eq!(HyperLogLog::<64>::decode(&lying), Err(Refusal::WrongShape));
 }
 
 // A rank was only bounded by the hash width, so a frame could hold one from a
@@ -169,37 +165,65 @@ fn a_rank_the_precision_cannot_reach_is_refused() {
     longer[2] = 54;
     assert_eq!(
         HyperLogLog::<4096>::decode(&longer),
-        Err(CodecError::Parameters)
+        Err(Refusal::Malformed)
     );
 
     assert_eq!(HyperLogLog::<4096>::decode(&frame), Ok(sketch));
 }
 
-#[cfg(feature = "std")]
 #[test]
-fn standard_error_follows_the_register_count() {
-    assert!((HyperLogLog::<1024>::standard_error() - 0.0325).abs() < 0.0001);
-    assert!((HyperLogLog::<4096>::standard_error() - 0.01625).abs() < 0.0001);
-}
-
-#[test]
-fn the_hand_rolled_logarithm_matches_the_libm_one() {
-    for step in 1..=20_000_u32 {
-        let argument = f64::from(step) * 3.3;
-        let error = (ln(argument) - argument.ln()).abs();
-        assert!(error < 1e-9, "{argument}: {error}");
+fn standard_error_needs_no_square_root() {
+    for (precision, error) in [
+        (4, HyperLogLog::<16>::standard_error()),
+        (7, HyperLogLog::<128>::standard_error()),
+        (10, HyperLogLog::<1024>::standard_error()),
+        (13, HyperLogLog::<8192>::standard_error()),
+        (16, HyperLogLog::<65_536>::standard_error()),
+    ] {
+        let exact = 1.04 / f64::from(1_u32 << precision).sqrt();
+        assert!(
+            (error - exact).abs() <= exact * 1e-15,
+            "{precision}: {error}"
+        );
     }
 }
 
-// Linear counting evaluates ln(m / zeros), which sits just above 1.0 for a
-// sparse sketch. That is the hot domain and the series' worst case.
+// Linear counting now takes its logarithm from sliderule-machines in fixed
+// point. The bound documented on `linear_count`, M * (ln(M/u) * 2^-53 +
+// 3 * 2^-58), is checked against libm over every untouched count at three
+// precisions. The libm reference is the less exact side: rounding M/u before
+// `ln` costs it up to 2^-53 absolute, and `ln` and the product one ulp each,
+// so the comparison allows M * (ln(M/u) * 2^-52 + 2^-52 + 4 * 2^-58).
 #[test]
-fn the_hand_rolled_logarithm_is_accurate_just_above_one() {
-    assert!(ln(1.0).abs() < 1e-12);
-
-    for step in 0..=20_000_u32 {
-        let argument = f64::mul_add(f64::from(step), 0.000_115, 1.0);
-        let error = (ln(argument) - argument.ln()).abs();
-        assert!(error < 1e-9, "{argument}: {error}");
+fn the_fixed_point_logarithm_stays_inside_its_stated_bound() {
+    for precision in [4_u32, 10, 16] {
+        let registers = 1_u32 << precision;
+        let m = f64::from(registers);
+        for untouched in 1..=registers {
+            let exact = m * (m / f64::from(untouched)).ln();
+            let slack = 2.0_f64.powi(-52) + 4.0 * 2.0_f64.powi(-58);
+            let bound = m * (exact / m).mul_add(2.0_f64.powi(-52), slack);
+            let error = (linear_count(precision, untouched) - exact).abs();
+            assert!(error <= bound, "{precision}/{untouched}: {error} > {bound}");
+        }
+        assert!(linear_count(precision, registers).abs() < f64::EPSILON);
     }
+}
+
+// Every input of the linear-counting branch is an integer and every step is
+// either integer arithmetic or an exactly representable f64 operation, so the
+// same registers give the same bits everywhere. Pinned here so a change to the
+// logarithm shows up as a changed bit pattern, not a drift inside tolerance.
+#[test]
+fn linear_counting_is_bit_for_bit_reproducible() {
+    let pinned = [
+        (10, 1023, linear_count(10, 1023).to_bits()),
+        (16, 1, linear_count(16, 1).to_bits()),
+    ];
+    for (precision, untouched, bits) in pinned {
+        assert_eq!(linear_count(precision, untouched).to_bits(), bits);
+    }
+    let mut sketch = HyperLogLog::<1024>::new();
+    fill(&mut sketch, 0..100);
+    assert_eq!(sketch.estimate().to_bits(), sketch.estimate().to_bits());
 }

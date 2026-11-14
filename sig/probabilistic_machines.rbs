@@ -1,35 +1,56 @@
 # Sketches that answer a counting question in memory fixed at construction
-# time. Every class here is defined by the native extension.
+# time. Every sketch class is defined by the native extension.
+#
+# Sizes come from a fixed menu (a class constant); anything else raises
+# RangeError, a non-Integer TypeError. A call the core refuses answers the
+# snake_case symbol of its `Refusal` variant, changes nothing and never raises.
+# No answer depends on, or records, a clock.
 module ProbabilisticMachines
   VERSION: String
 
-  class Error < StandardError
-  end
+  # Every refusal the crate answers.
+  type refusal = :truncated | :wrong_structure | :wrong_shape | :malformed | :full
+               | :overflow | :zero_count | :not_finite | :invalid_weight
 
-  # Raised when a cuckoo filter has nowhere left to put a fingerprint.
-  class Full < Error
-  end
+  # What `decode` refuses: a frame cut short, another structure's frame, a frame
+  # of another shape, or contents no sketch produces.
+  type decode_refusal = :truncated | :wrong_structure | :wrong_shape | :malformed
 
-  # A tracked key and its counter. The true count lies in
-  # `count - overestimate` through `count`.
+  # The core's `Hitter`. The true count lies in `count - overestimate` through
+  # `count`. Raises RangeError unless `overestimate < count` (both in
+  # `0...2**64`), TypeError for a non-String key or a non-Integer count.
   class Hitter < ::Data
     attr_reader key: String
     attr_reader count: Integer
     attr_reader overestimate: Integer
+
+    def self.new: (String key, Integer count, Integer overestimate) -> instance
+                | (key: String, count: Integer, overestimate: Integer) -> instance
   end
 
-  # One cluster of a digest: the mean of the values that collapsed into it.
+  # The core's `Centroid`: one cluster of a digest. Raises RangeError unless
+  # the mean is finite and the weight finite and positive, TypeError for a
+  # non-number. Stored as Floats.
   class Centroid < ::Data
     attr_reader mean: Float
     attr_reader weight: Float
+
+    def self.new: (Float | Integer mean, Float | Integer weight) -> instance
+                | (mean: Float | Integer, weight: Float | Integer) -> instance
   end
 
   # Distinct counts in a fixed register array.
   class HyperLogLog
-    # `registers` is 1024, 4096, 16384 or 65536.
-    def self.new: (registers: Integer) -> instance
+    REGISTERS: Array[Integer]
 
-    def self.load: (String blob) -> instance
+    # RangeError outside REGISTERS.
+    def self.new: (Integer registers) -> instance
+
+    # `:wrong_shape` for a register count this build does not carry.
+    def self.decode: (String bytes) -> (instance | decode_refusal)
+
+    # Reads a frame of this sketch's register count over it.
+    def decode_into: (String bytes) -> (:decoded | decode_refusal)
 
     def registers: () -> Integer
     def add: (String item) -> nil
@@ -44,47 +65,67 @@ module ProbabilisticMachines
 
     def empty?: () -> bool
 
-    # Unions `other` in. Raises `ArgumentError` on a different register count.
-    def merge: (HyperLogLog other) -> self
+    # Exact union. `:wrong_shape` for another register count.
+    def merge: (HyperLogLog other) -> (:merged | :wrong_shape)
 
-    def dump: () -> String
+    def encoded: () -> String
     def inspect: () -> String
   end
 
   # How often each item was seen, in `width * depth` counters.
   class CountMinSketch
-    # `width` is 1024 or 4096; `depth` is 4 or 8.
-    def self.new: (width: Integer, depth: Integer) -> instance
+    WIDTHS: Array[Integer]
+    DEPTHS: Array[Integer]
 
-    def self.load: (String blob) -> instance
+    # RangeError outside WIDTHS by DEPTHS; every pair is carried.
+    def self.new: (Integer width, Integer depth) -> instance
+
+    def self.decode: (String bytes) -> (instance | decode_refusal)
+    def decode_into: (String bytes) -> (:decoded | decode_refusal)
 
     def width: () -> Integer
     def depth: () -> Integer
-    def add: (String item, ?count: Integer) -> nil
+
+    # `:overflow` when one of the item's counters would pass `2**32 - 1`.
+    def add: (String item) -> (:added | :overflow)
+
+    # `count` is in `0...2**32` (RangeError otherwise); zero is `:zero_count`.
+    def add_count: (String item, Integer count) -> (:added | :zero_count | :overflow)
+
+    def add_hash_count: (Integer hash, Integer count) -> (:added | :zero_count | :overflow)
 
     # Never below the true count, and over it by at most
     # `e * total / width` with probability `1 - e ** -depth`.
-    def count: (String item) -> Integer
+    def estimate: (String item) -> Integer
+
+    def estimate_hash: (Integer hash) -> Integer
 
     # Sum of every count added.
     def total: () -> Integer
-    def saturated?: () -> bool
 
-    # Sums `other` in. Raises `ArgumentError` on a different shape.
-    def merge: (CountMinSketch other) -> self
+    # Exact sum. `:wrong_shape` for another width or depth.
+    def merge: (CountMinSketch other) -> (:merged | :overflow | :wrong_shape)
 
-    def dump: () -> String
+    def encoded: () -> String
     def inspect: () -> String
   end
 
   # Quantiles of a stream, in clusters instead of samples.
   class TDigest
-    def self.new: (compression: Integer) -> instance
+    MIN_COMPRESSION: Integer
 
-    def self.load: (String blob) -> instance
+    # RangeError below MIN_COMPRESSION or past 65535.
+    def self.new: (Integer compression) -> instance
+
+    def self.decode: (String bytes) -> (instance | :truncated | :wrong_structure | :malformed)
 
     def compression: () -> Integer
-    def add: (Float value, ?weight: Float) -> nil
+
+    def add: (Float | Integer value) -> (:added | :not_finite | :overflow)
+
+    # One value standing for `weight` observations.
+    def add_weighted: (Float | Integer value, Float | Integer weight)
+                    -> (:added | :not_finite | :invalid_weight | :overflow)
 
     # Value at quantile `q`, `Float::NAN` when empty.
     def quantile: (Float q) -> Float
@@ -106,53 +147,75 @@ module ProbabilisticMachines
 
     def empty?: () -> bool
     def centroids: () -> Array[Centroid]
-    def merge: (TDigest other) -> self
-    def dump: () -> String
+
+    # Collapses adjacent clusters up to the weight their quantile allows.
+    def compress: () -> nil
+
+    # `:wrong_shape` for a digest of another compression.
+    def merge: (TDigest other) -> (:merged | :wrong_shape | :overflow)
+
+    def encoded: () -> String
     def inspect: () -> String
   end
 
   # Membership that can forget, in `buckets * 4` fingerprints.
   class CuckooFilter
-    # `buckets` is 1024, 4096, 16384 or 65536.
-    def self.new: (buckets: Integer) -> instance
+    BUCKETS: Array[Integer]
 
-    def self.load: (String blob) -> instance
+    # RangeError outside BUCKETS.
+    def self.new: (Integer buckets) -> instance
+
+    def self.decode: (String bytes) -> (instance | :truncated | :wrong_structure | :wrong_shape)
+    def decode_into: (String bytes) -> (:decoded | :truncated | :wrong_structure | :wrong_shape)
 
     def buckets: () -> Integer
 
     # Fingerprint slots in the table, `buckets * 4`.
     def capacity: () -> Integer
 
-    # Raises `Full` when the item has nowhere to go.
-    def insert: (String item) -> bool
+    # Stores one more copy of the item's fingerprint.
+    def insert: (String item) -> (:inserted | :full)
+
+    def insert_hash: (Integer hash) -> (:inserted | :full)
 
     # Never false for an item that was inserted; true for one that was not
     # with probability about 3%.
-    def include?: (String item) -> bool
+    def contains?: (String item) -> bool
 
-    alias contains? include?
+    def contains_hash?: (Integer hash) -> bool
 
-    # Only for items that were inserted: removing an item that merely collides
-    # with one takes the other item's fingerprint with it.
-    def remove: (String item) -> bool
+    # `:cleared` clears one copy of the item's fingerprint, which may have
+    # been a colliding item's: only remove what you inserted. `:not_held`
+    # proves the fingerprint is in neither bucket; nothing changed.
+    def remove: (String item) -> (:cleared | :not_held)
+
+    def remove_hash: (Integer hash) -> (:cleared | :not_held)
 
     def size: () -> Integer
     def empty?: () -> bool
-    def dump: () -> String
+    def encoded: () -> String
     def inspect: () -> String
   end
 
-  # Which keys dominate a stream, in `k` counters instead of one per key.
+  # Which keys dominate a stream, in a fixed number of counters.
   class HeavyHitters
-    # `k` is 16, 64 or 256.
-    def self.new: (k: Integer) -> instance
+    COUNTERS: Array[Integer]
 
-    def self.load: (String blob) -> instance
+    # RangeError outside COUNTERS.
+    def self.new: (Integer counters) -> instance
 
-    def k: () -> Integer
+    # `:malformed` also covers a key table that is cut short or does not name
+    # every tracked key.
+    def self.decode: (String bytes) -> (instance | decode_refusal)
+    def decode_into: (String bytes) -> (:decoded | decode_refusal)
 
-    # Keys are UTF-8 strings, so `top` and `ranked` can hand them back.
-    def add: (String key, ?count: Integer) -> nil
+    def counters: () -> Integer
+
+    # Keys are UTF-8 strings, so the Hitter values can hand them back.
+    def add: (String key) -> (:added | :overflow)
+
+    # `count` is in `0...2**64` (RangeError otherwise); zero is `:zero_count`.
+    def add_count: (String key, Integer count) -> (:added | :zero_count | :overflow)
 
     # Upper bound on how often `key` occurred, 0 when it is not tracked.
     def count: (String key) -> Integer
@@ -160,22 +223,25 @@ module ProbabilisticMachines
     # Observations fed in.
     def observed: () -> Integer
 
-    # Keys currently tracked, at most `k`.
+    # Keys currently tracked, at most `counters`.
     def size: () -> Integer
 
     def empty?: () -> bool
 
-    # The `n` most frequent tracked keys, most frequent first.
-    def top: (Integer n) -> Array[Hitter]
+    # The most frequent tracked key, nil when nothing is tracked.
+    def top: () -> Hitter?
 
     # Every tracked key, most frequent first.
     def ranked: () -> Array[Hitter]
 
-    # Folds `other` in. Raises `ArgumentError` on a different `k`.
-    def merge: (HeavyHitters other) -> self
+    # Every tracked key, in the table's own order.
+    def hitters: () -> Array[Hitter]
+
+    # `:wrong_shape` for another counter count.
+    def merge: (HeavyHitters other) -> (:merged | :overflow | :wrong_shape)
 
     # The crate's frame followed by the key table that carries the strings.
-    def dump: () -> String
+    def encoded: () -> String
 
     def inspect: () -> String
   end

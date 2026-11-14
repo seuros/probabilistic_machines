@@ -1,27 +1,25 @@
 //! Approximate membership with deletions, which a Bloom filter cannot do.
 
 use crate::hash::{hash64, mix64, u32_low_u8, u64_low_u8, u64_low_u16};
-use crate::{CodecError, TAG_CUCKOO, encode_frame, open_frame};
+use crate::{Refusal, TAG_CUCKOO, open_frame};
 
 const SLOTS: usize = 4;
 const EMPTY: u8 = 0;
 const MAX_KICKS: usize = 64;
 
-/// The filter has no room left for this item.
-///
-/// Cuckoo hashing gives up before the table is literally full; expect that
-/// past about 95% of [`CuckooFilter::CAPACITY`]. The filter is unchanged when
-/// an insert fails.
+/// What [`CuckooFilter::remove`] did. Both answers are honoured, and both are
+/// about the item's fingerprint, which is all the filter stores.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Full;
-
-impl core::fmt::Display for Full {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.write_str("cuckoo filter full")
-    }
+#[must_use]
+pub enum Removing {
+    /// One copy of the item's fingerprint was cleared from one of its two
+    /// buckets. Not a proof the item was inserted: the fingerprint may have
+    /// been another item's. See the caveat on [`CuckooFilter::remove`].
+    Cleared,
+    /// Neither of the item's buckets holds its fingerprint, so the item is not
+    /// in the filter: what the call asked for already holds. Nothing changed.
+    NotHeld,
 }
-
-impl core::error::Error for Full {}
 
 /// Answers "have I seen this?" in `B * 4` bytes, and unlike a Bloom filter it
 /// can forget.
@@ -32,19 +30,20 @@ impl core::error::Error for Full {}
 /// inserted; it says yes to an item that was not with probability at most
 /// `2 * 4 / 255`, about 3%.
 ///
-/// [`remove`](Self::remove) must only be called for items that were inserted:
-/// deleting an item that merely collides with one takes the other item's
-/// fingerprint with it.
+/// The filter is a multiset of fingerprints: inserting an item twice stores
+/// two copies, and it takes two removals to forget it. It cannot tell a repeat
+/// from a collision, so an insert is never answered as a duplicate.
 ///
 /// ```
-/// use probabilistic_machines::CuckooFilter;
+/// use probabilistic_machines::{CuckooFilter, Removing};
 ///
 /// let mut seen = CuckooFilter::<1024>::new();
 /// assert_eq!(seen.insert(b"device-9"), Ok(()));
 /// assert!(seen.contains(b"device-9"));
 ///
-/// assert!(seen.remove(b"device-9"));
+/// assert_eq!(seen.remove(b"device-9"), Removing::Cleared);
 /// assert!(!seen.contains(b"device-9"));
+/// assert_eq!(seen.remove(b"device-9"), Removing::NotHeld);
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CuckooFilter<const B: usize> {
@@ -85,11 +84,14 @@ impl<const B: usize> CuckooFilter<B> {
         self.items == 0
     }
 
+    /// Stores one copy of the item's fingerprint.
+    ///
     /// # Errors
     ///
-    /// [`Full`] when the item's two buckets and 64 evictions all failed to
-    /// find a slot. The filter is left as it was.
-    pub fn insert(&mut self, item: &[u8]) -> Result<(), Full> {
+    /// [`Refusal::Full`] when the item's two buckets and 64 evictions all
+    /// failed to find a slot: expect that past about 95% of
+    /// [`CAPACITY`](Self::CAPACITY). The filter is left as it was.
+    pub fn insert(&mut self, item: &[u8]) -> Result<(), Refusal> {
         self.insert_hash(hash64(item))
     }
 
@@ -97,9 +99,9 @@ impl<const B: usize> CuckooFilter<B> {
     ///
     /// # Errors
     ///
-    /// [`Full`] when the item's two buckets and 64 evictions all failed to
-    /// find a slot. The filter is left as it was.
-    pub fn insert_hash(&mut self, hash: u64) -> Result<(), Full> {
+    /// [`Refusal::Full`] when the item's two buckets and 64 evictions all
+    /// failed to find a slot. The filter is left as it was.
+    pub fn insert_hash(&mut self, hash: u64) -> Result<(), Refusal> {
         let fingerprint = fingerprint(hash);
         let primary = Self::bucket(hash);
         if self.place(primary, fingerprint) {
@@ -129,7 +131,7 @@ impl<const B: usize> CuckooFilter<B> {
         for step in path.iter().rev() {
             core::mem::swap(&mut carried, &mut self.buckets[step / SLOTS][step % SLOTS]);
         }
-        Err(Full)
+        Err(Refusal::Full)
     }
 
     #[must_use]
@@ -147,35 +149,33 @@ impl<const B: usize> CuckooFilter<B> {
             || self.buckets[alternate].contains(&fingerprint)
     }
 
-    /// Drops one copy of an item, reporting whether a fingerprint was cleared.
-    pub fn remove(&mut self, item: &[u8]) -> bool {
+    /// Drops one copy of an item.
+    ///
+    /// [`Removing::NotHeld`] is a proof: a filter has no false negatives, so
+    /// an item whose fingerprint is in neither of its buckets was not there,
+    /// and nothing changed. [`Removing::Cleared`] is not one. A fingerprint is
+    /// eight bits, so about 3% of items that were never inserted match a
+    /// stored one (the same false positive [`contains`](Self::contains) has),
+    /// and removing such an item clears the fingerprint of the item it
+    /// collides with, which the filter then denies having seen. Only remove
+    /// what was inserted.
+    pub fn remove(&mut self, item: &[u8]) -> Removing {
         self.remove_hash(hash64(item))
     }
 
-    /// Drops an item the caller already hashed.
-    pub fn remove_hash(&mut self, hash: u64) -> bool {
+    /// Drops an item the caller already hashed. As [`remove`](Self::remove).
+    pub fn remove_hash(&mut self, hash: u64) -> Removing {
         let fingerprint = fingerprint(hash);
         let primary = Self::bucket(hash);
         let alternate = Self::alternate(primary, fingerprint);
-        self.clear(primary, fingerprint) || self.clear(alternate, fingerprint)
+        if self.clear(primary, fingerprint) || self.clear(alternate, fingerprint) {
+            Removing::Cleared
+        } else {
+            Removing::NotHeld
+        }
     }
 
-    /// Writes the filter into `out`, returning the number of bytes written.
-    ///
-    /// # Errors
-    ///
-    /// [`CodecError::Truncated`] when `out` is shorter than
-    /// [`ENCODED_LEN`](Self::ENCODED_LEN).
-    pub fn encode(&self, out: &mut [u8]) -> Result<usize, CodecError> {
-        encode_frame(out, Self::ENCODED_LEN, |frame| self.write_frame(frame))
-    }
-
-    /// The filter's frame, exactly [`ENCODED_LEN`](Self::ENCODED_LEN) bytes.
-    #[cfg(feature = "alloc")]
-    #[must_use]
-    pub fn encoded(&self) -> alloc::boxed::Box<[u8]> {
-        crate::encoded_frame(Self::ENCODED_LEN, |frame| self.write_frame(frame))
-    }
+    encoders!("filter");
 
     /// Fills a frame of exactly [`ENCODED_LEN`](Self::ENCODED_LEN) bytes.
     fn write_frame(&self, frame: &mut [u8]) {
@@ -192,10 +192,12 @@ impl<const B: usize> CuckooFilter<B> {
     ///
     /// # Errors
     ///
-    /// [`CodecError::Truncated`] when `bytes` is too short, [`CodecError::Tag`]
-    /// when it holds another structure, [`CodecError::Parameters`] when it was
-    /// written with a different bucket count.
-    pub fn decode(bytes: &[u8]) -> Result<Self, CodecError> {
+    /// [`Refusal::Truncated`] when `bytes` is too short,
+    /// [`Refusal::WrongStructure`] when it holds another structure,
+    /// [`Refusal::WrongShape`] when it was written with a different bucket
+    /// count. Every table of fingerprints is one some inserts could leave, so
+    /// this decoder never answers [`Refusal::Malformed`].
+    pub fn decode(bytes: &[u8]) -> Result<Self, Refusal> {
         let mut filter = Self::new();
         filter.decode_into(bytes)?;
         Ok(filter)
@@ -209,10 +211,10 @@ impl<const B: usize> CuckooFilter<B> {
     /// # Errors
     ///
     /// The same as [`decode`](Self::decode).
-    pub fn decode_into(&mut self, bytes: &[u8]) -> Result<(), CodecError> {
+    pub fn decode_into(&mut self, bytes: &[u8]) -> Result<(), Refusal> {
         let frame = open_frame(bytes, Self::ENCODED_LEN, TAG_CUCKOO)?;
         if frame[1] != u32_low_u8(B.trailing_zeros()) {
-            return Err(CodecError::Parameters);
+            return Err(Refusal::WrongShape);
         }
 
         self.items = 0;

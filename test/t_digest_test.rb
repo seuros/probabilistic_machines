@@ -4,9 +4,14 @@ require 'test_helper'
 
 module ProbabilisticMachines
   class TDigestTest < Minitest::Test
+    def uniform(points, compression = 100)
+      digest = TDigest.new(compression)
+      (1..points).each { |value| assert_equal :added, digest.add(value) }
+      digest
+    end
+
     def test_quantiles_land_inside_one_cluster_of_the_truth
-      digest = TDigest.new(compression: 100)
-      (1..10_000).each { |value| digest.add(value.to_f) }
+      digest = uniform(10_000)
 
       assert_equal 100, digest.compression
       assert_equal 10_000.0, digest.count
@@ -17,8 +22,17 @@ module ProbabilisticMachines
       assert_equal 10_000.0, digest.quantile(1.0)
     end
 
+    def test_a_compression_below_the_minimum_raises_range_error
+      assert_equal 10, TDigest::MIN_COMPRESSION
+      [0, 1, 9, 65_536].each do |compression|
+        assert_raises(RangeError) { TDigest.new(compression) }
+      end
+      assert_raises(TypeError) { TDigest.new(100.0) }
+      assert_equal 10, TDigest.new(10).compression
+    end
+
     def test_an_empty_digest_has_no_quantile
-      digest = TDigest.new(compression: 100)
+      digest = TDigest.new(100)
 
       assert_predicate digest, :empty?
       assert_predicate digest.quantile(0.5), :nan?
@@ -26,20 +40,39 @@ module ProbabilisticMachines
     end
 
     def test_a_weighted_value_stands_for_that_many_observations
-      digest = TDigest.new(compression: 200)
-      digest.add(1.0, weight: 900.0)
-      digest.add(100.0, weight: 100.0)
+      digest = TDigest.new(200)
 
+      assert_equal :added, digest.add_weighted(1.0, 900.0)
+      assert_equal :added, digest.add_weighted(100, 100)
       assert_equal 1_000.0, digest.count
-      assert_equal 2, digest.size
-      assert_equal [900.0, 100.0], digest.centroids.map(&:weight)
-      assert_equal 1.0, digest.quantile(0.0)
-      assert_equal 100.0, digest.quantile(1.0)
+      assert_equal [Centroid.new(1.0, 900.0), Centroid.new(100.0, 100.0)], digest.centroids
+    end
+
+    def test_an_add_outside_the_precondition_is_refused_and_changes_nothing
+      digest = uniform(100)
+      before = digest.encoded
+
+      assert_equal :not_finite, digest.add(Float::NAN)
+      assert_equal :not_finite, digest.add(-Float::INFINITY)
+      assert_equal :not_finite, digest.add_weighted(1.0, Float::INFINITY)
+      assert_equal :invalid_weight, digest.add_weighted(1.0, 0)
+      assert_equal :invalid_weight, digest.add_weighted(1.0, -1.0)
+      assert_equal before, digest.encoded
+      assert_raises(TypeError) { digest.add('1.0') }
+    end
+
+    def test_a_total_weight_that_cannot_stay_finite_is_refused
+      digest = TDigest.new(100)
+      digest.add_weighted(1.0, 1e308)
+      before = digest.encoded
+
+      assert_equal :overflow, digest.add_weighted(2.0, 1e308)
+      assert_equal :overflow, digest.merge(digest)
+      assert_equal before, digest.encoded
     end
 
     def test_centroids_are_frozen_and_carry_the_weight
-      digest = TDigest.new(compression: 50)
-      (1..1_000).each { |value| digest.add(value.to_f) }
+      digest = uniform(1_000, 50)
       centroids = digest.centroids
 
       assert_equal digest.size, centroids.size
@@ -48,80 +81,65 @@ module ProbabilisticMachines
       assert_in_delta digest.count, centroids.sum(&:weight), 0.000_1
     end
 
-    def test_dump_load_round_trips
-      digest = TDigest.new(compression: 100)
-      (1..10_000).each { |value| digest.add(value.to_f) }
-      blob = digest.dump
+    def test_compress_keeps_the_total
+      digest = uniform(500, 10)
+      count = digest.count
+
+      assert_nil digest.compress
+      assert_equal count, digest.count
+      assert_operator digest.size, :<=, 100
+    end
+
+    def test_encoded_decode_round_trips
+      digest = uniform(10_000)
+      blob = digest.encoded
 
       assert_equal Encoding::BINARY, blob.encoding
       assert_equal 31 + (digest.size * 16), blob.bytesize
-
-      restored = TDigest.load(blob)
-
-      assert_equal [100, digest.size, digest.count], [restored.compression, restored.size, restored.count]
-      assert_in_delta digest.quantile(0.99), restored.quantile(0.99), 0.000_1
+      assert_equal blob, TDigest.decode(blob).encoded
     end
 
-    def test_load_rejects_a_blob_it_did_not_write
-      assert_raises(ArgumentError) { TDigest.load('') }
-      assert_raises(ArgumentError) { TDigest.load(HyperLogLog.new(registers: 1024).dump) }
-      assert_raises(ArgumentError) { TDigest.load("\xd1\x64\x00".b + ("\x00".b * 30)) }
-    end
+    def test_decode_answers_refusal_symbols
+      assert_equal :truncated, TDigest.decode('')
+      assert_equal :wrong_structure, TDigest.decode(HyperLogLog.new(1024).encoded)
+      assert_equal :malformed, TDigest.decode("\xd1\x64\x00".b + ("\x00".b * 28))
 
-    def test_load_rejects_a_blob_that_lost_whole_centroids
-      digest = TDigest.new(compression: 10)
-      [1.0, 2.0, 3.0].each { |value| digest.add(value) }
-      blob = digest.dump
+      blob = uniform(3, 10).encoded
 
-      assert_raises(ArgumentError) { TDigest.load(blob.byteslice(0, 31)) }
-      assert_raises(ArgumentError) { TDigest.load(blob.byteslice(0, blob.bytesize - 16)) }
-      assert_equal 3.0, TDigest.load(blob).count
+      assert_equal :truncated, TDigest.decode(blob.byteslice(0, blob.bytesize - 16))
+      [0, 1, 9].each do |compression|
+        tampered = blob.dup
+        tampered[1, 2] = [compression].pack('S<')
+
+        assert_equal :malformed, TDigest.decode(tampered)
+      end
     end
 
     def test_merge_folds_both_streams
-      left = TDigest.new(compression: 100)
-      right = TDigest.new(compression: 100)
-      (1..5_000).each { |value| left.add(value.to_f) }
-      (5_001..10_000).each { |value| right.add(value.to_f) }
+      left = TDigest.new(100)
+      right = TDigest.new(100)
+      (1..5_000).each { |value| left.add(value) }
+      (5_001..10_000).each { |value| right.add(value) }
 
-      assert_same left, left.merge(right)
+      assert_equal :merged, left.merge(right)
       assert_equal 10_000.0, left.count
       assert_in_delta 5_000, left.quantile(0.5), 10_000 / 100.0
     end
 
+    def test_merge_of_another_compression_is_refused_and_changes_nothing
+      digest = uniform(100)
+      before = digest.encoded
+
+      assert_equal :wrong_shape, digest.merge(uniform(100, 200))
+      assert_equal before, digest.encoded
+    end
+
     def test_merge_with_the_receiver_doubles_the_count
-      digest = TDigest.new(compression: 100)
-      (1..1_000).each { |value| digest.add(value.to_f) }
+      digest = uniform(1_000)
 
-      digest.merge(digest)
-
+      assert_equal :merged, digest.merge(digest)
       assert_equal 2_000.0, digest.count
       assert_in_delta 500, digest.quantile(0.5), 1_000 / 100.0
-    end
-
-    def test_a_compression_that_holds_no_quantile_is_rejected
-      assert_raises(ArgumentError) { TDigest.new(compression: 0) }
-    end
-
-    def test_a_blob_claiming_a_compression_the_binding_refuses_does_not_load
-      digest = TDigest.new(compression: 10)
-      digest.add(1.0)
-
-      [0, 1, 9].each do |refused|
-        blob = digest.dump
-        blob[1, 2] = [refused].pack('S<')
-
-        assert_raises(ArgumentError) { TDigest.load(blob) }
-      end
-      assert_equal 10, TDigest.load(digest.dump).compression
-    end
-
-    def test_a_total_weight_that_cannot_stay_finite_is_rejected
-      digest = TDigest.new(compression: 100)
-      digest.add(1.0, weight: 1e308)
-
-      assert_raises(ArgumentError) { digest.add(2.0, weight: 1e308) }
-      assert_predicate digest.count, :finite?
     end
   end
 end

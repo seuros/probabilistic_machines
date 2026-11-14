@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 authors = ["Abdelkader Boudih <oss@seuros.com>"]
 license = "MIT"
-description = "Sketches for distinct counts, quantiles and frequencies - no_std, zero dependencies"
+description = "Sketches for distinct counts, quantiles and frequencies - no_std, fixed-size except the t-digest"
 repository = "https://github.com/seuros/probabilistic_machines"
 keywords = ["hyperloglog", "t-digest", "count-min", "sketch", "no-std"]
 categories = ["no-std", "algorithms", "data-structures"]
@@ -16,9 +16,11 @@ name = "probabilistic_machines"
 crate-type = ["lib"]
 
 [features]
-default = ["std"]
-std = ["alloc"]
+default = ["alloc"]
 alloc = []
+
+[dependencies]
+sliderule-machines = ">=0.2"
 
 [lints]
 workspace = true

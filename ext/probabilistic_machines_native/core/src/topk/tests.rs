@@ -1,13 +1,15 @@
+use super::Hitter;
 use super::{HEADER_LEN, HeavyHitters, OVERESTIMATE_AT, RECORD_LEN};
-use crate::CodecError;
+use crate::Refusal;
+use crate::hash::mix64;
 
 #[test]
 fn a_key_above_one_over_k_is_always_tracked() {
     let mut table = HeavyHitters::<u32, 16>::new();
     for round in 0..10_000_u32 {
-        table.add(round % 500);
+        assert_eq!(table.add(round % 500), Ok(()));
         if round % 3 == 0 {
-            table.add(7);
+            assert_eq!(table.add(7), Ok(()));
         }
     }
 
@@ -20,10 +22,10 @@ fn a_key_above_one_over_k_is_always_tracked() {
 fn counters_bracket_the_truth() {
     let mut table = HeavyHitters::<u32, 8>::new();
     for round in 0..4_000_u32 {
-        table.add(round % 200);
+        assert_eq!(table.add(round % 200), Ok(()));
     }
     for _ in 0..1_000 {
-        table.add(42);
+        assert_eq!(table.add(42), Ok(()));
     }
 
     for hitter in table.hitters() {
@@ -37,7 +39,7 @@ fn counters_bracket_the_truth() {
 fn the_table_never_outgrows_its_counters() {
     let mut table = HeavyHitters::<u32, 4>::new();
     for key in 0..50_u32 {
-        table.add(key);
+        assert_eq!(table.add(key), Ok(()));
     }
 
     assert_eq!(table.len(), 4);
@@ -57,10 +59,10 @@ fn an_empty_table_reports_nothing() {
 fn weighted_adds_match_repeated_ones() {
     let mut one_at_a_time = HeavyHitters::<u8, 4>::new();
     for _ in 0..100 {
-        one_at_a_time.add(9);
+        assert_eq!(one_at_a_time.add(9), Ok(()));
     }
     let mut in_bulk = HeavyHitters::<u8, 4>::new();
-    in_bulk.add_count(9, 100);
+    assert_eq!(in_bulk.add_count(9, 100), Ok(()));
 
     assert_eq!(one_at_a_time, in_bulk);
 }
@@ -69,12 +71,12 @@ fn weighted_adds_match_repeated_ones() {
 fn merging_sums_what_both_sides_tracked() {
     let mut left = HeavyHitters::<u32, 8>::new();
     let mut right = HeavyHitters::<u32, 8>::new();
-    left.add_count(1, 500);
-    left.add_count(2, 10);
-    right.add_count(1, 300);
-    right.add_count(3, 20);
+    assert_eq!(left.add_count(1, 500), Ok(()));
+    assert_eq!(left.add_count(2, 10), Ok(()));
+    assert_eq!(right.add_count(1, 300), Ok(()));
+    assert_eq!(right.add_count(3, 20), Ok(()));
 
-    left.merge(&right);
+    assert_eq!(left.merge(&right), Ok(()));
     assert_eq!(left.count(&1), 800);
     assert_eq!(left.count(&2), 10);
     assert_eq!(left.count(&3), 20);
@@ -86,15 +88,15 @@ fn merging_sums_what_both_sides_tracked() {
 #[test]
 fn merging_widens_a_key_the_source_evicted() {
     let mut source = HeavyHitters::<u32, 16>::new();
-    source.add(9_999);
+    assert_eq!(source.add(9_999), Ok(()));
     for key in 0..16_u32 {
-        source.add_count(key, 100);
+        assert_eq!(source.add_count(key, 100), Ok(()));
     }
     assert_eq!(source.count(&9_999), 0);
 
     let mut table = HeavyHitters::<u32, 16>::new();
-    table.add_count(9_999, 1_000);
-    table.merge(&source);
+    assert_eq!(table.add_count(9_999, 1_000), Ok(()));
+    assert_eq!(table.merge(&source), Ok(()));
 
     assert_eq!(table.count(&9_999), 1_100);
     for hitter in table.hitters().filter(|hitter| hitter.key == 9_999) {
@@ -106,12 +108,12 @@ fn merging_widens_a_key_the_source_evicted() {
 #[test]
 fn a_key_both_sides_track_takes_no_floor() {
     let mut source = HeavyHitters::<u32, 2>::new();
-    source.add_count(1, 7);
-    source.add_count(2, 5);
+    assert_eq!(source.add_count(1, 7), Ok(()));
+    assert_eq!(source.add_count(2, 5), Ok(()));
 
     let mut table = HeavyHitters::<u32, 2>::new();
-    table.add_count(1, 1_000);
-    table.merge(&source);
+    assert_eq!(table.add_count(1, 1_000), Ok(()));
+    assert_eq!(table.merge(&source), Ok(()));
 
     assert_eq!(table.count(&1), 1_007);
     for hitter in table.hitters().filter(|hitter| hitter.key == 1) {
@@ -119,23 +121,126 @@ fn a_key_both_sides_track_takes_no_floor() {
     }
 }
 
+// Saturating silently stopped the counter below the true count, so it no
+// longer bounded it from above. Overflow is now refused and changes nothing.
 #[test]
-fn counters_saturate_instead_of_wrapping() {
+fn an_addition_past_u64_is_refused_and_changes_nothing() {
     let mut table = HeavyHitters::<u8, 2>::new();
-    table.add_count(1, u64::MAX);
-    table.add_count(1, u64::MAX);
+    assert_eq!(table.add_count(1, u64::MAX), Ok(()));
+    let before = table.clone();
 
+    assert_eq!(table.add_count(1, 1), Err(Refusal::Overflow));
+    assert_eq!(table.add_count(2, 1), Err(Refusal::Overflow));
+    assert_eq!(table, before);
     assert_eq!(table.count(&1), u64::MAX);
-    assert_eq!(table.observed(), u64::MAX);
+}
+
+#[test]
+fn an_eviction_past_u64_is_refused_and_changes_nothing() {
+    let mut table = HeavyHitters::<u8, 1>::new();
+    assert_eq!(table.add_count(1, u64::MAX - 1), Ok(()));
+    let mut other = HeavyHitters::<u8, 1>::new();
+    assert_eq!(other.add_count(2, 2), Ok(()));
+    let before = table.clone();
+
+    assert_eq!(table.merge(&other), Err(Refusal::Overflow));
+    assert_eq!(table, before);
+}
+
+#[test]
+fn a_merge_whose_floor_overflows_is_refused_and_changes_nothing() {
+    let mut table = HeavyHitters::<u8, 2>::new();
+    assert_eq!(table.add_count(1, u64::MAX / 2), Ok(()));
+    let mut other = HeavyHitters::<u8, 2>::new();
+    assert_eq!(other.add_count(2, u64::MAX / 4), Ok(()));
+    assert_eq!(other.add_count(3, u64::MAX / 4 + 2), Ok(()));
+    let before = table.clone();
+    let mut doubled = table.clone();
+    assert_eq!(doubled.add_count(1, u64::MAX / 2), Ok(()));
+    let before_doubled = doubled.clone();
+
+    assert_eq!(doubled.merge(&other), Err(Refusal::Overflow));
+    assert_eq!(doubled, before_doubled);
+    assert_eq!(table, before);
+}
+
+// A zero count used to evict the weakest key of a full table for a key that
+// was never seen.
+#[test]
+fn a_zero_count_is_refused_and_evicts_nothing() {
+    let mut table = HeavyHitters::<u8, 2>::new();
+    assert_eq!(table.add_count(1, 3), Ok(()));
+    assert_eq!(table.add_count(2, 4), Ok(()));
+    let before = table.clone();
+
+    assert_eq!(table.add_count(3, 0), Err(Refusal::ZeroCount));
+    assert_eq!(table, before);
+}
+
+#[test]
+fn a_hand_built_hitter_claims_at_least_one_occurrence() {
+    assert_eq!(
+        Hitter::new(7_u8, 10, 9),
+        Some(Hitter {
+            key: 7,
+            count: 10,
+            overestimate: 9
+        })
+    );
+    assert_eq!(Hitter::new(7_u8, 10, 10), None);
+    assert_eq!(Hitter::new(7_u8, 0, 0), None);
+}
+
+// The reference model: exact counts per key. After every call every tracked
+// counter brackets the truth, every key above observed / K is tracked, and a
+// refusal leaves the table equal to a clone taken before the call.
+#[test]
+fn a_random_stream_keeps_the_bounds_and_refusals_change_nothing() {
+    let mut table = HeavyHitters::<u8, 6>::new();
+    let mut truth = [0_u64; 40];
+    let mut state = 0xD1B5_4A32_D192_ED03_u64;
+    for _ in 0..4_000 {
+        state = mix64(state);
+        let key = crate::hash::u64_low_u8(state) % 40;
+        let count = match state >> 59 {
+            0 => 0,
+            1 => u64::MAX / 8,
+            _ => (state >> 20) % 50,
+        };
+        let before = table.clone();
+        match table.add_count(key, count) {
+            Ok(()) => truth[usize::from(key)] += count,
+            Err(refused) => {
+                let expected = if count == 0 {
+                    Refusal::ZeroCount
+                } else {
+                    Refusal::Overflow
+                };
+                assert_eq!(refused, expected);
+                assert_eq!(table, before);
+            }
+        }
+        assert_eq!(table.observed(), truth.iter().sum::<u64>());
+        for hitter in table.hitters() {
+            let exact = truth[usize::from(hitter.key)];
+            assert!(hitter.count >= exact, "{hitter:?} {exact}");
+            assert!(hitter.count - hitter.overestimate <= exact, "{hitter:?}");
+        }
+        for (key, &exact) in (0_u8..).zip(&truth) {
+            if exact > table.observed() / 6 {
+                assert!(table.count(&key) >= exact, "{key}");
+            }
+        }
+    }
 }
 
 #[cfg(feature = "alloc")]
 #[test]
 fn ranking_puts_the_loudest_first() {
     let mut table = HeavyHitters::<u32, 8>::new();
-    table.add_count(1, 5);
-    table.add_count(2, 50);
-    table.add_count(3, 500);
+    assert_eq!(table.add_count(1, 5), Ok(()));
+    assert_eq!(table.add_count(2, 50), Ok(()));
+    assert_eq!(table.add_count(3, 500), Ok(()));
 
     let ranked = table.ranked();
     let keys: alloc::vec::Vec<u32> = ranked.iter().map(|hitter| hitter.key).collect();
@@ -146,7 +251,7 @@ fn ranking_puts_the_loudest_first() {
 fn frames_round_trip_and_reject_foreign_bytes() {
     let mut table = HeavyHitters::<u64, 8>::new();
     for key in 0..20_u64 {
-        table.add_count(key, key * 10);
+        assert_eq!(table.add_count(key, key * 10 + 1), Ok(()));
     }
 
     let mut frame = [0_u8; HeavyHitters::<u64, 8>::ENCODED_LEN];
@@ -154,33 +259,37 @@ fn frames_round_trip_and_reject_foreign_bytes() {
     #[cfg(feature = "alloc")]
     assert_eq!(&*table.encoded(), &frame[..]);
     assert_eq!(HeavyHitters::<u64, 8>::decode(&frame), Ok(table.clone()));
+    let empty = HeavyHitters::<u64, 8>::new();
+    let mut blank = [0_u8; HeavyHitters::<u64, 8>::ENCODED_LEN];
+    assert_eq!(empty.encode(&mut blank), Ok(blank.len()));
+    assert_eq!(HeavyHitters::<u64, 8>::decode(&blank), Ok(empty));
 
     let short = frame.len() - 1;
-    assert_eq!(
-        table.encode(&mut frame[..short]),
-        Err(CodecError::Truncated)
-    );
+    assert_eq!(table.encode(&mut frame[..short]), Err(Refusal::Truncated));
     assert_eq!(
         HeavyHitters::<u64, 8>::decode(&frame[..short]),
-        Err(CodecError::Truncated)
+        Err(Refusal::Truncated)
     );
 
     let mut wrong = frame;
     wrong[0] = 0x00;
-    assert_eq!(HeavyHitters::<u64, 8>::decode(&wrong), Err(CodecError::Tag));
+    assert_eq!(
+        HeavyHitters::<u64, 8>::decode(&wrong),
+        Err(Refusal::WrongStructure)
+    );
 
     let mut lying = frame;
     lying[1] = 4;
     assert_eq!(
         HeavyHitters::<u64, 8>::decode(&lying),
-        Err(CodecError::Parameters)
+        Err(Refusal::WrongShape)
     );
 
     let mut overfull = frame;
     overfull[11] = 9;
     assert_eq!(
         HeavyHitters::<u64, 8>::decode(&overfull),
-        Err(CodecError::Parameters)
+        Err(Refusal::Malformed)
     );
 }
 
@@ -189,28 +298,14 @@ fn frames_round_trip_and_reject_foreign_bytes() {
 fn stacked_floors() -> HeavyHitters<u64, 2> {
     let mut left = HeavyHitters::<u64, 2>::new();
     let mut right = HeavyHitters::<u64, 2>::new();
-    right.add(0);
-    right.add(2);
-    left.add(1);
-    left.merge(&right);
-    right.merge(&left);
-    right.add(0);
-    left.merge(&right);
+    assert_eq!(right.add(0), Ok(()));
+    assert_eq!(right.add(2), Ok(()));
+    assert_eq!(left.add(1), Ok(()));
+    assert_eq!(left.merge(&right), Ok(()));
+    assert_eq!(right.merge(&left), Ok(()));
+    assert_eq!(right.add(0), Ok(()));
+    assert_eq!(left.merge(&right), Ok(()));
     left
-}
-
-/// A table whose weakest counter went to a key the merged-in table tracked
-/// without ever seeing it, so the counter is all floor and the interval it
-/// claims starts at nothing.
-fn pure_floor() -> HeavyHitters<u64, 2> {
-    let mut source = HeavyHitters::<u64, 2>::new();
-    source.add_count(7, 0);
-
-    let mut table = HeavyHitters::<u64, 2>::new();
-    table.add_count(5, 10);
-    table.add_count(6, 20);
-    table.merge(&source);
-    table
 }
 
 // A record's count and its overestimate were read with no bound from the
@@ -219,8 +314,8 @@ fn pure_floor() -> HeavyHitters<u64, 2> {
 #[test]
 fn records_no_stream_could_leave_are_refused() {
     let mut table = HeavyHitters::<u64, 2>::new();
-    table.add_count(1, 10);
-    table.add_count(2, 10);
+    assert_eq!(table.add_count(1, 10), Ok(()));
+    assert_eq!(table.add_count(2, 10), Ok(()));
 
     let mut frame = [0_u8; HeavyHitters::<u64, 2>::ENCODED_LEN];
     assert_eq!(table.encode(&mut frame), Ok(frame.len()));
@@ -229,21 +324,21 @@ fn records_no_stream_could_leave_are_refused() {
     unobserved[3] = 0;
     assert_eq!(
         HeavyHitters::<u64, 2>::decode(&unobserved),
-        Err(CodecError::Parameters)
+        Err(Refusal::Malformed)
     );
 
     let mut inverted = frame;
     inverted[HEADER_LEN + OVERESTIMATE_AT] = u8::MAX;
     assert_eq!(
         HeavyHitters::<u64, 2>::decode(&inverted),
-        Err(CodecError::Parameters)
+        Err(Refusal::Malformed)
     );
 
     let mut twice = frame;
     twice[HEADER_LEN + RECORD_LEN] = frame[HEADER_LEN];
     assert_eq!(
         HeavyHitters::<u64, 2>::decode(&twice),
-        Err(CodecError::Parameters)
+        Err(Refusal::Malformed)
     );
 
     let stacked = stacked_floors();
@@ -255,29 +350,37 @@ fn records_no_stream_could_leave_are_refused() {
     assert_eq!(stacked.encode(&mut frame), Ok(frame.len()));
     assert_eq!(HeavyHitters::<u64, 2>::decode(&frame), Ok(stacked));
 
-    let inherited = pure_floor();
-    assert!(
-        inherited
-            .hitters()
-            .any(|hitter| hitter.count > 0 && hitter.overestimate == hitter.count)
+    // A counter that is all floor claims no occurrence of its key. Only a zero
+    // count produced one, and a zero count is now refused.
+    let mut table = HeavyHitters::<u64, 2>::new();
+    assert_eq!(table.add_count(5, 10), Ok(()));
+    assert_eq!(table.encode(&mut frame), Ok(frame.len()));
+    let mut all_floor = frame;
+    all_floor[HEADER_LEN + OVERESTIMATE_AT] = 10;
+    assert_eq!(
+        HeavyHitters::<u64, 2>::decode(&all_floor),
+        Err(Refusal::Malformed)
     );
-    assert_eq!(inherited.encode(&mut frame), Ok(frame.len()));
-    assert_eq!(HeavyHitters::<u64, 2>::decode(&frame), Ok(inherited));
 }
 
-#[cfg(feature = "alloc")]
+// The record slots past the tracked count were never read, so a frame with
+// bytes there decoded to the same table as the zeroed frame `encode` writes:
+// two frames for one state. Only the canonical frame is accepted.
 #[test]
-fn an_empty_table_round_trips() {
-    let table = HeavyHitters::<u64, 4>::new();
-    assert_eq!(HeavyHitters::<u64, 4>::decode(&table.encoded()), Ok(table));
-}
+fn bytes_past_the_tracked_records_are_refused() {
+    let mut table = HeavyHitters::<u64, 2>::new();
+    assert_eq!(table.add_count(1, 3), Ok(()));
+    let mut frame = [0_u8; HeavyHitters::<u64, 2>::ENCODED_LEN];
+    assert_eq!(table.encode(&mut frame), Ok(frame.len()));
+    assert_eq!(HeavyHitters::<u64, 2>::decode(&frame), Ok(table.clone()));
 
-#[test]
-fn a_frame_from_another_structure_is_refused() {
-    let counters = crate::CountMinSketch::<4, 2>::new();
-    let mut frame = [0_u8; HeavyHitters::<u64, 8>::ENCODED_LEN];
-    assert_eq!(counters.encode(&mut frame), Ok(12 + 4 * 2 * 4));
-    assert_eq!(HeavyHitters::<u64, 8>::decode(&frame), Err(CodecError::Tag));
+    for at in HEADER_LEN + RECORD_LEN..frame.len() {
+        let mut stray = frame;
+        stray[at] = 1;
+        let mut held = table.clone();
+        assert_eq!(held.decode_into(&stray), Err(Refusal::Malformed), "{at}");
+        assert_eq!(held, table);
+    }
 }
 
 /// An owned key needs no interning: the table clones on insert and compares by
@@ -289,9 +392,12 @@ fn an_owned_key_needs_no_interning() {
 
     let mut layers = HeavyHitters::<String, 8>::new();
     for tick in 0..900 {
-        layers.add(if tick % 3 == 0 { "horizon" } else { "stars" }.to_string());
+        assert_eq!(
+            layers.add(if tick % 3 == 0 { "horizon" } else { "stars" }.to_string()),
+            Ok(())
+        );
     }
-    layers.add("grid".to_string());
+    assert_eq!(layers.add("grid".to_string()), Ok(()));
 
     assert_eq!(layers.count(&"stars".to_string()), 600);
     assert_eq!(layers.count(&"horizon".to_string()), 300);
@@ -301,8 +407,8 @@ fn an_owned_key_needs_no_interning() {
     );
 
     let mut merged = HeavyHitters::<String, 8>::new();
-    merged.add_count("grid".to_string(), 5);
-    merged.merge(&layers);
+    assert_eq!(merged.add_count("grid".to_string(), 5), Ok(()));
+    assert_eq!(merged.merge(&layers), Ok(()));
     assert_eq!(merged.count(&"grid".to_string()), 6);
     assert_eq!(merged.observed(), 906);
 }

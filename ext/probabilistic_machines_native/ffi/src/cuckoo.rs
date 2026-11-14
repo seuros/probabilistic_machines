@@ -2,12 +2,11 @@
 
 use std::cell::RefCell;
 
-use bytes::Bytes;
-use magnus::scan_args::scan_args;
-use magnus::{Error, RHash, RModule, RString, Ruby, Value, function, method, prelude::*};
-use probabilistic_machines::{CodecError, CuckooFilter};
+use magnus::typed_data::Obj;
+use magnus::{Error, RModule, RString, Ruby, Value, function, method, prelude::*};
+use probabilistic_machines::{CuckooFilter, Refusal, Removing};
 
-use crate::{Whole, codec_error, full, required_kwarg, unsupported, unsupported_blob};
+use crate::{Whole, answer, decoded_or_refused, define_class, sizes, unsupported};
 
 /// Bucket counts [`Filter`] is monomorphised for.
 const BUCKETS: [usize; 4] = [1024, 4096, 16384, 65536];
@@ -50,40 +49,58 @@ fn boxed_new<const N: usize>() -> Box<CuckooFilter<N>> {
 }
 
 #[inline(never)]
-fn boxed_decode<const N: usize>(ruby: &Ruby, frame: &[u8]) -> Result<Box<CuckooFilter<N>>, Error> {
+fn boxed_decode<const N: usize>(frame: &[u8]) -> Result<Box<CuckooFilter<N>>, Refusal> {
     let mut filter = boxed_new::<N>();
-    filter
-        .decode_into(frame)
-        .map_err(|error| codec_error(ruby, error))?;
+    filter.decode_into(frame)?;
     Ok(filter)
 }
 
+/// The filter a frame holds. A bucket count this build does not carry is read
+/// as the smallest one it does, which answers exactly what the core answers a
+/// type of another shape: `Truncated`, `WrongStructure` or `WrongShape`.
+fn decoded(frame: &[u8]) -> Result<Filter, Refusal> {
+    Ok(match frame.get(1) {
+        Some(12) => Filter::B4096(boxed_decode(frame)?),
+        Some(14) => Filter::B16384(boxed_decode(frame)?),
+        Some(16) => Filter::B65536(boxed_decode(frame)?),
+        Some(_) | None => Filter::B1024(boxed_decode(frame)?),
+    })
+}
+
+/// The symbol of an honoured removal.
+fn removing(ruby: &Ruby, removed: Removing) -> Value {
+    ruby.to_symbol(match removed {
+        Removing::Cleared => "cleared",
+        Removing::NotHeld => "not_held",
+    })
+    .as_value()
+}
+
 impl Wrapper {
-    fn new(ruby: &Ruby, args: &[Value]) -> Result<Self, Error> {
-        let args = scan_args::<(), (), (), (), RHash, ()>(args)?;
-        let Whole(buckets): Whole<usize> = required_kwarg(args.keywords, "buckets")?;
+    /// `CuckooFilter.new(buckets)`. `RangeError` outside [`BUCKETS`].
+    fn new(ruby: &Ruby, Whole(buckets): Whole<usize>) -> Result<Self, Error> {
         let filter = match buckets {
-            1024 => Filter::B1024(boxed_new::<1024>()),
-            4096 => Filter::B4096(boxed_new::<4096>()),
-            16384 => Filter::B16384(boxed_new::<16384>()),
-            65536 => Filter::B65536(boxed_new::<65536>()),
+            1024 => Filter::B1024(boxed_new()),
+            4096 => Filter::B4096(boxed_new()),
+            16384 => Filter::B16384(boxed_new()),
+            65536 => Filter::B65536(boxed_new()),
             _ => return Err(unsupported(ruby, "buckets", buckets, &BUCKETS)),
         };
         Ok(Self(RefCell::new(filter)))
     }
 
-    fn load(ruby: &Ruby, blob: Bytes) -> Result<Self, Error> {
-        let Some(&exponent) = blob.get(1) else {
-            return Err(codec_error(ruby, CodecError::Truncated));
-        };
-        let filter = match exponent {
-            10 => Filter::B1024(boxed_decode::<1024>(ruby, &blob)?),
-            12 => Filter::B4096(boxed_decode::<4096>(ruby, &blob)?),
-            14 => Filter::B16384(boxed_decode::<16384>(ruby, &blob)?),
-            16 => Filter::B65536(boxed_decode::<65536>(ruby, &blob)?),
-            _ => return Err(unsupported_blob(ruby, "bucket count", &BUCKETS)),
-        };
-        Ok(Self(RefCell::new(filter)))
+    /// `CuckooFilter.decode(bytes)`: a filter, or the refusal symbol.
+    fn decode(ruby: &Ruby, bytes: RString) -> Value {
+        let bytes = bytes.to_bytes();
+        decoded_or_refused(ruby, decoded(&bytes).map(|held| Self(RefCell::new(held))))
+    }
+
+    fn decode_into(ruby: &Ruby, this: Obj<Self>, bytes: RString) -> Result<Value, Error> {
+        let bytes = bytes.to_bytes();
+        this.check_frozen()?;
+        let outcome = filter!(&mut *this.0.borrow_mut(), |filter| filter
+            .decode_into(&bytes));
+        Ok(answer(ruby, outcome, "decoded"))
     }
 
     fn buckets(&self) -> usize {
@@ -94,18 +111,39 @@ impl Wrapper {
         filter!(&*self.0.borrow(), |filter| capacity_of(&**filter))
     }
 
-    fn insert(ruby: &Ruby, rb_self: &Self, item: Bytes) -> Result<bool, Error> {
-        filter!(&mut *rb_self.0.borrow_mut(), |filter| filter.insert(&item))
-            .map(|()| true)
-            .map_err(|_| full(ruby))
+    fn insert(ruby: &Ruby, this: Obj<Self>, item: RString) -> Result<Value, Error> {
+        let item = item.to_bytes();
+        this.check_frozen()?;
+        let outcome = filter!(&mut *this.0.borrow_mut(), |filter| filter.insert(&item));
+        Ok(answer(ruby, outcome, "inserted"))
     }
 
-    fn contains(&self, item: Bytes) -> bool {
+    fn insert_hash(ruby: &Ruby, this: Obj<Self>, Whole(hash): Whole<u64>) -> Result<Value, Error> {
+        this.check_frozen()?;
+        let outcome = filter!(&mut *this.0.borrow_mut(), |filter| filter.insert_hash(hash));
+        Ok(answer(ruby, outcome, "inserted"))
+    }
+
+    fn contains(&self, item: RString) -> bool {
+        let item = item.to_bytes();
         filter!(&*self.0.borrow(), |filter| filter.contains(&item))
     }
 
-    fn remove(&self, item: Bytes) -> bool {
-        filter!(&mut *self.0.borrow_mut(), |filter| filter.remove(&item))
+    fn contains_hash(&self, Whole(hash): Whole<u64>) -> bool {
+        filter!(&*self.0.borrow(), |filter| filter.contains_hash(hash))
+    }
+
+    fn remove(ruby: &Ruby, this: Obj<Self>, item: RString) -> Result<Value, Error> {
+        let item = item.to_bytes();
+        this.check_frozen()?;
+        let removed = filter!(&mut *this.0.borrow_mut(), |filter| filter.remove(&item));
+        Ok(removing(ruby, removed))
+    }
+
+    fn remove_hash(ruby: &Ruby, this: Obj<Self>, Whole(hash): Whole<u64>) -> Result<Value, Error> {
+        this.check_frozen()?;
+        let removed = filter!(&mut *this.0.borrow_mut(), |filter| filter.remove_hash(hash));
+        Ok(removing(ruby, removed))
     }
 
     fn size(&self) -> usize {
@@ -116,8 +154,8 @@ impl Wrapper {
         filter!(&*self.0.borrow(), |filter| filter.is_empty())
     }
 
-    fn dump(ruby: &Ruby, rb_self: &Self) -> RString {
-        let frame = filter!(&*rb_self.0.borrow(), |filter| filter.encoded());
+    fn encoded(ruby: &Ruby, this: &Self) -> RString {
+        let frame = filter!(&*this.0.borrow(), |filter| filter.encoded());
         ruby.str_from_slice(&frame)
     }
 
@@ -132,18 +170,22 @@ impl Wrapper {
 }
 
 pub fn define(ruby: &Ruby, module: RModule) -> Result<(), Error> {
-    let class = module.define_class("CuckooFilter", ruby.class_object())?;
-    class.define_singleton_method("new", function!(Wrapper::new, -1))?;
-    class.define_singleton_method("load", function!(Wrapper::load, 1))?;
+    let class = define_class(ruby, module, "CuckooFilter")?;
+    class.const_set("BUCKETS", sizes(ruby, &BUCKETS))?;
+    class.define_singleton_method("new", function!(Wrapper::new, 1))?;
+    class.define_singleton_method("decode", function!(Wrapper::decode, 1))?;
+    class.define_method("decode_into", method!(Wrapper::decode_into, 1))?;
     class.define_method("buckets", method!(Wrapper::buckets, 0))?;
     class.define_method("capacity", method!(Wrapper::capacity, 0))?;
     class.define_method("insert", method!(Wrapper::insert, 1))?;
-    class.define_method("include?", method!(Wrapper::contains, 1))?;
+    class.define_method("insert_hash", method!(Wrapper::insert_hash, 1))?;
     class.define_method("contains?", method!(Wrapper::contains, 1))?;
+    class.define_method("contains_hash?", method!(Wrapper::contains_hash, 1))?;
     class.define_method("remove", method!(Wrapper::remove, 1))?;
+    class.define_method("remove_hash", method!(Wrapper::remove_hash, 1))?;
     class.define_method("size", method!(Wrapper::size, 0))?;
     class.define_method("empty?", method!(Wrapper::is_empty, 0))?;
-    class.define_method("dump", method!(Wrapper::dump, 0))?;
+    class.define_method("encoded", method!(Wrapper::encoded, 0))?;
     class.define_method("inspect", method!(Wrapper::inspect, 0))?;
     Ok(())
 }

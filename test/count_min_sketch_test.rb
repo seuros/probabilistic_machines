@@ -4,119 +4,138 @@ require 'test_helper'
 
 module ProbabilisticMachines
   class CountMinSketchTest < Minitest::Test
-    def test_every_supported_shape_is_monomorphised
-      [1024, 4096].product([4, 8]).each do |width, depth|
-        sketch = CountMinSketch.new(width: width, depth: depth)
+    # The largest count one counter holds.
+    COUNTER_LIMIT = (2**32) - 1
+
+    def test_exactly_the_supported_shapes_are_monomorphised
+      assert_equal [[1024, 4096], [4, 8]], [CountMinSketch::WIDTHS, CountMinSketch::DEPTHS]
+      CountMinSketch::WIDTHS.product(CountMinSketch::DEPTHS).each do |width, depth|
+        sketch = CountMinSketch.new(width, depth)
 
         assert_equal [width, depth], [sketch.width, sketch.depth]
       end
-    end
 
-    def test_an_unsupported_shape_is_rejected
-      assert_raises(ArgumentError) { CountMinSketch.new(width: 2048, depth: 4) }
-      assert_raises(ArgumentError) { CountMinSketch.new(width: 4096, depth: 5) }
-      assert_raises(ArgumentError) { CountMinSketch.new(width: 16_384, depth: 8) }
-      assert_raises(ArgumentError) { CountMinSketch.new(width: 4096) }
+      assert_raises(RangeError) { CountMinSketch.new(2048, 4) }
+      assert_raises(RangeError) { CountMinSketch.new(4096, 5) }
+      assert_raises(RangeError) { CountMinSketch.new(16_384, 8) }
+      assert_raises(TypeError) { CountMinSketch.new(4096, 4.0) }
     end
 
     def test_counts_never_fall_below_the_truth_and_stay_inside_the_bound
-      sketch = CountMinSketch.new(width: 1024, depth: 4)
+      sketch = CountMinSketch.new(1024, 4)
       truth = Hash.new(0)
       5_000.times do |id|
         key = "path-#{id % 700}"
         truth[key] += 3
-        sketch.add(key, count: 3)
+
+        assert_equal :added, sketch.add_count(key, 3)
       end
 
       assert_equal 15_000, sketch.total
-
       truth.each do |key, count|
-        assert_operator sketch.count(key), :>=, count
-        assert_operator sketch.count(key), :<=, count + (Math::E * sketch.total / 1024)
+        assert_operator sketch.estimate(key), :>=, count
+        assert_operator sketch.estimate(key), :<=, count + (Math::E * sketch.total / 1024)
       end
     end
 
-    def test_an_item_that_was_never_added_counts_zero
-      assert_equal 0, CountMinSketch.new(width: 1024, depth: 4).count('nothing')
+    def test_hashes_count_like_items
+      sketch = CountMinSketch.new(1024, 4)
+
+      assert_equal :added, sketch.add_hash_count(42, 7)
+      assert_equal 7, sketch.estimate_hash(42)
+      assert_equal 0, sketch.estimate('nothing')
     end
 
-    def test_dump_load_round_trips
-      sketch = CountMinSketch.new(width: 1024, depth: 8)
-      100.times { |id| sketch.add("path-#{id}", count: id) }
-      blob = sketch.dump
+    def test_an_addition_past_a_full_counter_is_refused_and_changes_nothing
+      sketch = CountMinSketch.new(1024, 4)
+
+      assert_equal :added, sketch.add_count('path', COUNTER_LIMIT)
+      before = sketch.encoded
+
+      assert_equal :overflow, sketch.add('path')
+      assert_equal :overflow, sketch.add_count('path', 2)
+      assert_equal before, sketch.encoded
+      assert_equal COUNTER_LIMIT, sketch.estimate('path')
+      assert_raises(RangeError) { sketch.add_count('path', 2**32) }
+    end
+
+    def test_a_zero_count_is_refused_and_changes_nothing
+      sketch = CountMinSketch.new(1024, 4)
+
+      assert_equal :zero_count, sketch.add_count('path', 0)
+      assert_equal :zero_count, sketch.add_hash_count(1, 0)
+      assert_equal 0, sketch.total
+      assert_raises(RangeError) { sketch.add_count('path', -1) }
+      assert_raises(TypeError) { sketch.add_count('path', 0.9) }
+    end
+
+    def test_encoded_decode_round_trips
+      sketch = CountMinSketch.new(1024, 8)
+      100.times { |id| sketch.add_count("path-#{id}", id + 1) }
+      blob = sketch.encoded
 
       assert_equal Encoding::BINARY, blob.encoding
       assert_equal 12 + (1024 * 8 * 4), blob.bytesize
 
-      restored = CountMinSketch.load(blob)
+      restored = CountMinSketch.decode(blob)
 
       assert_equal [1024, 8, sketch.total], [restored.width, restored.depth, restored.total]
-      assert_equal sketch.count('path-99'), restored.count('path-99')
+      assert_equal blob, restored.encoded
     end
 
-    def test_load_rejects_a_blob_it_did_not_write
-      assert_raises(ArgumentError) { CountMinSketch.load('') }
-      assert_raises(ArgumentError) { CountMinSketch.load(HyperLogLog.new(registers: 1024).dump) }
-      assert_raises(ArgumentError) { CountMinSketch.load("\xc1\x0b\x04".b + ("\x00".b * 8_192)) }
+    def test_decode_answers_refusal_symbols
+      assert_equal :truncated, CountMinSketch.decode('')
+      assert_equal :wrong_structure, CountMinSketch.decode("\xa1".b * (12 + (1024 * 16)))
+      assert_equal :wrong_shape, CountMinSketch.decode("\xc1\x0b\x04".b + ("\x00".b * 16_400))
+
+      flagged = CountMinSketch.new(1024, 4).encoded
+      flagged.setbyte(11, 1)
+
+      assert_equal :malformed, CountMinSketch.decode(flagged)
+    end
+
+    def test_decode_into_reads_over_the_receiver_or_changes_nothing
+      sketch = CountMinSketch.new(1024, 4)
+      sketch.add('mine')
+      source = CountMinSketch.new(1024, 4)
+      source.add_count('theirs', 9)
+      before = sketch.encoded
+
+      assert_equal :wrong_shape, sketch.decode_into(CountMinSketch.new(1024, 8).encoded)
+      assert_equal before, sketch.encoded
+      assert_equal :decoded, sketch.decode_into(source.encoded)
+      assert_equal 9, sketch.total
     end
 
     def test_merge_sums_the_counts
-      left = CountMinSketch.new(width: 1024, depth: 4)
-      right = CountMinSketch.new(width: 1024, depth: 4)
-      left.add('path', count: 5)
-      right.add('path', count: 7)
+      left = CountMinSketch.new(1024, 4)
+      right = CountMinSketch.new(1024, 4)
+      left.add_count('path', 5)
+      right.add_count('path', 7)
 
-      assert_same left, left.merge(right)
-      assert_equal 12, left.count('path')
+      assert_equal :merged, left.merge(right)
+      assert_equal 12, left.estimate('path')
       assert_equal 12, left.total
     end
 
-    def test_merge_rejects_another_shape
-      assert_raises(ArgumentError) do
-        CountMinSketch.new(width: 1024, depth: 4).merge(CountMinSketch.new(width: 1024, depth: 8))
-      end
-    end
+    def test_merge_refusals_change_nothing
+      sketch = CountMinSketch.new(1024, 4)
+      sketch.add_count('path', COUNTER_LIMIT)
+      before = sketch.encoded
+      one = CountMinSketch.new(1024, 4)
+      one.add('path')
 
-    # The widest count a single counter holds before it stops rising.
-    COUNTER_LIMIT = (2**32) - 1
-
-    def test_a_counter_reports_itself_saturated_only_once_it_stops_rising
-      sketch = CountMinSketch.new(width: 1024, depth: 4)
-
-      refute_predicate sketch, :saturated?
-
-      sketch.add('path', count: COUNTER_LIMIT)
-
-      refute_predicate sketch, :saturated?
-      assert_equal COUNTER_LIMIT, sketch.count('path')
-
-      sketch.add('path')
-
-      assert_predicate sketch, :saturated?
-      assert_equal COUNTER_LIMIT, sketch.count('path')
-      assert_equal COUNTER_LIMIT + 1, sketch.total
-    end
-
-    def test_saturation_survives_a_merge_and_a_round_trip
-      saturated = CountMinSketch.new(width: 1024, depth: 4)
-      saturated.add('path', count: COUNTER_LIMIT)
-      saturated.add('path')
-
-      assert_predicate CountMinSketch.load(saturated.dump), :saturated?
-
-      fresh = CountMinSketch.new(width: 1024, depth: 4)
-      fresh.merge(saturated)
-
-      assert_predicate fresh, :saturated?
+      assert_equal :overflow, sketch.merge(one)
+      assert_equal :wrong_shape, sketch.merge(CountMinSketch.new(1024, 8))
+      assert_equal before, sketch.encoded
     end
 
     def test_merge_with_the_receiver_doubles_it
-      sketch = CountMinSketch.new(width: 1024, depth: 4)
-      sketch.add('path', count: 5)
+      sketch = CountMinSketch.new(1024, 4)
+      sketch.add_count('path', 5)
 
-      sketch.merge(sketch)
-
-      assert_equal 10, sketch.count('path')
+      assert_equal :merged, sketch.merge(sketch)
+      assert_equal 10, sketch.estimate('path')
       assert_equal 10, sketch.total
     end
   end

@@ -1,10 +1,16 @@
-use super::{CENTROID_LEN, HEADER_LEN, TDigest};
-use crate::CodecError;
+use core::assert_matches;
+
+use super::{CENTROID_LEN, Centroid, HEADER_LEN, MIN_COMPRESSION, TDigest};
+use crate::Refusal;
+
+fn built(compression: u16) -> TDigest {
+    TDigest::new(compression).unwrap_or_else(|| panic!("compression {compression}"))
+}
 
 fn uniform(points: u32, compression: u16) -> TDigest {
-    let mut digest = TDigest::new(compression);
+    let mut digest = built(compression);
     for point in 1..=points {
-        digest.add(f64::from(point));
+        assert_eq!(digest.add(f64::from(point)), Ok(()));
     }
     digest
 }
@@ -54,7 +60,7 @@ fn the_cluster_count_stays_bounded_whatever_the_stream_length() {
 
 #[test]
 fn an_empty_digest_has_no_quantiles() {
-    let digest = TDigest::new(100);
+    let digest = built(100);
     assert!(digest.is_empty());
     assert!(digest.quantile(0.5).is_nan());
     assert!(digest.cdf(0.5).is_nan());
@@ -62,8 +68,8 @@ fn an_empty_digest_has_no_quantiles() {
 
 #[test]
 fn a_single_point_is_every_quantile() {
-    let mut digest = TDigest::new(100);
-    digest.add(42.0);
+    let mut digest = built(100);
+    assert_eq!(digest.add(42.0), Ok(()));
     for &quantile in &[0.0, 0.25, 0.5, 0.75, 1.0] {
         assert!((digest.quantile(quantile) - 42.0).abs() < f64::EPSILON);
     }
@@ -71,9 +77,9 @@ fn a_single_point_is_every_quantile() {
 
 #[test]
 fn a_thousand_copies_of_one_value_do_not_divide_by_zero() {
-    let mut digest = TDigest::new(50);
+    let mut digest = built(50);
     for _ in 0..1_000 {
-        digest.add(42.0);
+        assert_eq!(digest.add(42.0), Ok(()));
     }
 
     assert!((digest.quantile(0.5) - 42.0).abs() < f64::EPSILON);
@@ -83,12 +89,12 @@ fn a_thousand_copies_of_one_value_do_not_divide_by_zero() {
 
 #[test]
 fn a_weighted_point_stands_for_repeats_of_it() {
-    let mut weighted = TDigest::new(200);
-    let mut repeated = TDigest::new(200);
+    let mut weighted = built(200);
+    let mut repeated = built(200);
     for value in 1..=100_u32 {
-        weighted.add_weighted(f64::from(value), 10.0);
+        assert_eq!(weighted.add_weighted(f64::from(value), 10.0), Ok(()));
         for _ in 0..10 {
-            repeated.add(f64::from(value));
+            assert_eq!(repeated.add(f64::from(value)), Ok(()));
         }
     }
 
@@ -113,21 +119,21 @@ fn the_cdf_inverts_the_quantile() {
 
 #[test]
 fn merging_agrees_with_one_digest_fed_both_streams() {
-    let mut left = TDigest::new(100);
-    let mut right = TDigest::new(100);
-    let mut together = TDigest::new(100);
+    let mut left = built(100);
+    let mut right = built(100);
+    let mut together = built(100);
 
     for point in 1..=20_000_u32 {
         let value = f64::from(point);
         if point % 2 == 0 {
-            left.add(value);
+            assert_eq!(left.add(value), Ok(()));
         } else {
-            right.add(value);
+            assert_eq!(right.add(value), Ok(()));
         }
-        together.add(value);
+        assert_eq!(together.add(value), Ok(()));
     }
 
-    left.merge(&right);
+    assert_eq!(left.merge(&right), Ok(()));
     assert!((left.count() - together.count()).abs() < f64::EPSILON);
     assert!((left.minimum() - 1.0).abs() < f64::EPSILON);
     assert!((left.maximum() - 20_000.0).abs() < f64::EPSILON);
@@ -142,7 +148,7 @@ fn merging_agrees_with_one_digest_fed_both_streams() {
 fn merging_an_empty_digest_keeps_the_distribution() {
     let mut digest = uniform(1_000, 100);
     let before = digest.clone();
-    digest.merge(&TDigest::new(100));
+    assert_eq!(digest.merge(&built(100)), Ok(()));
 
     assert!((digest.count() - before.count()).abs() < f64::EPSILON);
     assert!((digest.minimum() - before.minimum()).abs() < f64::EPSILON);
@@ -170,16 +176,16 @@ fn frames_reject_foreign_bytes() {
     let mut frame = alloc::vec![0_u8; written];
     assert_eq!(digest.encode(&mut frame), Ok(written));
 
-    assert_eq!(digest.encode(&mut frame[..10]), Err(CodecError::Truncated));
-    assert_eq!(TDigest::decode(&frame[..10]), Err(CodecError::Truncated));
+    assert_eq!(digest.encode(&mut frame[..10]), Err(Refusal::Truncated));
+    assert_eq!(TDigest::decode(&frame[..10]), Err(Refusal::Truncated));
     assert_eq!(
         TDigest::decode(&frame[..written - 1]),
-        Err(CodecError::Truncated)
+        Err(Refusal::Truncated)
     );
 
     let mut wrong = frame.clone();
     wrong[0] = 0x00;
-    assert_eq!(TDigest::decode(&wrong), Err(CodecError::Tag));
+    assert_eq!(TDigest::decode(&wrong), Err(Refusal::WrongStructure));
 }
 
 // A body of whole cluster records passed for a whole digest, so dropping
@@ -193,17 +199,17 @@ fn a_frame_that_lost_whole_clusters_is_not_a_digest() {
 
     assert_eq!(
         TDigest::decode(&frame[..HEADER_LEN]),
-        Err(CodecError::Truncated)
+        Err(Refusal::Truncated)
     );
     assert_eq!(
         TDigest::decode(&frame[..frame.len() - CENTROID_LEN]),
-        Err(CodecError::Truncated)
+        Err(Refusal::Truncated)
     );
     assert_eq!(TDigest::decode(&frame), Ok(digest));
 
     let mut heavier = frame.clone();
     heavier[7..15].copy_from_slice(&(count * (1.0 + 1e-3)).to_le_bytes());
-    assert_eq!(TDigest::decode(&heavier), Err(CodecError::Parameters));
+    assert_eq!(TDigest::decode(&heavier), Err(Refusal::Malformed));
 
     let mut drifted = frame;
     drifted[7..15].copy_from_slice(&(count * (1.0 + 1e-9)).to_le_bytes());
@@ -223,7 +229,7 @@ fn a_frame_claiming_an_impossible_total_is_not_a_digest() {
         tampered[7..15].copy_from_slice(&total.to_le_bytes());
         assert_eq!(
             TDigest::decode(&tampered),
-            Err(CodecError::Parameters),
+            Err(Refusal::Malformed),
             "total {total}"
         );
     }
@@ -234,22 +240,19 @@ fn a_frame_claiming_an_impossible_total_is_not_a_digest() {
         let at = HEADER_LEN + slot * CENTROID_LEN + 8;
         overflowing[at..at + 8].copy_from_slice(&f64::MAX.to_le_bytes());
     }
-    assert_eq!(TDigest::decode(&overflowing), Err(CodecError::Parameters));
+    assert_eq!(TDigest::decode(&overflowing), Err(Refusal::Malformed));
 
     assert_eq!(TDigest::decode(&frame), Ok(digest));
-    assert_eq!(
-        TDigest::decode(&TDigest::new(10).encoded()),
-        Ok(TDigest::new(10))
-    );
+    assert_eq!(TDigest::decode(&built(10).encoded()), Ok(built(10)));
 }
 
 // Subtracting opposite-sign extremes overflowed before the multiply, so a
 // finite population produced an infinite quantile and q75 fell below q50.
 #[test]
 fn opposite_sign_extremes_interpolate_to_a_finite_monotonic_answer() {
-    let mut digest = TDigest::new(100);
-    digest.add(-1e308);
-    digest.add(1e308);
+    let mut digest = built(100);
+    assert_eq!(digest.add(-1e308), Ok(()));
+    assert_eq!(digest.add(1e308), Ok(()));
 
     let q50 = digest.quantile(0.5);
     let q75 = digest.quantile(0.75);
@@ -264,12 +267,12 @@ fn opposite_sign_extremes_interpolate_to_a_finite_monotonic_answer() {
 // that gave NaN quantiles and lost the exact maximum.
 #[test]
 fn collapsing_opposite_sign_extremes_keeps_every_cluster_finite() {
-    let mut digest = TDigest::new(1);
-    for _ in 0..6 {
-        digest.add(-1e308);
+    let mut digest = built(MIN_COMPRESSION);
+    for _ in 0..60 {
+        assert_eq!(digest.add(-1e308), Ok(()));
     }
-    for _ in 0..6 {
-        digest.add(1e308);
+    for _ in 0..60 {
+        assert_eq!(digest.add(1e308), Ok(()));
     }
 
     assert!(
@@ -300,9 +303,9 @@ fn collapsing_opposite_sign_extremes_keeps_every_cluster_finite() {
 // stream instead of half.
 #[test]
 fn the_midpoint_of_opposite_sign_extremes_is_half_the_stream() {
-    let mut wide = TDigest::new(100);
-    wide.add(-f64::MAX);
-    wide.add(f64::MAX);
+    let mut wide = built(100);
+    assert_eq!(wide.add(-f64::MAX), Ok(()));
+    assert_eq!(wide.add(f64::MAX), Ok(()));
 
     let middle = wide.cdf(0.0);
     assert!((middle - 0.5).abs() < f64::EPSILON, "cdf(0) was {middle}");
@@ -310,9 +313,9 @@ fn the_midpoint_of_opposite_sign_extremes_is_half_the_stream() {
     assert!((wide.quantile(1.0) - f64::MAX).abs() < f64::EPSILON);
 
     let step = 2.0 * f64::EPSILON;
-    let mut narrow = TDigest::new(100);
-    narrow.add(1.0);
-    narrow.add(1.0 + step + step);
+    let mut narrow = built(100);
+    assert_eq!(narrow.add(1.0), Ok(()));
+    assert_eq!(narrow.add(1.0 + step + step), Ok(()));
 
     let halfway = narrow.cdf(1.0 + step);
     assert!((halfway - 0.5).abs() < f64::EPSILON, "cdf was {halfway}");
@@ -324,9 +327,9 @@ fn the_midpoint_of_opposite_sign_extremes_is_half_the_stream() {
 #[test]
 fn a_subnormal_span_interpolates_without_rounding_to_zero() {
     let smallest = f64::MIN_POSITIVE * f64::EPSILON;
-    let mut tiny = TDigest::new(100);
-    tiny.add(0.0);
-    tiny.add(smallest);
+    let mut tiny = built(100);
+    assert_eq!(tiny.add(0.0), Ok(()));
+    assert_eq!(tiny.add(smallest), Ok(()));
 
     let low = tiny.cdf(0.0);
     assert!((low - 0.25).abs() < f64::EPSILON, "cdf(0) was {low}");
@@ -334,15 +337,130 @@ fn a_subnormal_span_interpolates_without_rounding_to_zero() {
     assert!(tiny.quantile(0.0).total_cmp(&0.0).is_eq());
     assert!(tiny.quantile(1.0).total_cmp(&smallest).is_eq());
 
-    let mut neighbours = TDigest::new(100);
-    neighbours.add(smallest);
-    neighbours.add(smallest * 3.0);
+    let mut neighbours = built(100);
+    assert_eq!(neighbours.add(smallest), Ok(()));
+    assert_eq!(neighbours.add(smallest * 3.0), Ok(()));
     let between = neighbours.cdf(smallest * 2.0);
     assert!((between - 0.5).abs() < f64::EPSILON, "cdf was {between}");
 
-    let mut wide = TDigest::new(100);
-    wide.add(-f64::MAX);
-    wide.add(f64::MAX);
+    let mut wide = built(100);
+    assert_eq!(wide.add(-f64::MAX), Ok(()));
+    assert_eq!(wide.add(f64::MAX), Ok(()));
     let middle = wide.cdf(0.0);
     assert!((middle - 0.5).abs() < f64::EPSILON, "cdf(0) was {middle}");
+}
+
+#[test]
+fn a_compression_below_the_minimum_builds_nothing() {
+    assert_eq!(TDigest::new(0), None);
+    assert_eq!(TDigest::new(MIN_COMPRESSION - 1), None);
+    assert_eq!(built(MIN_COMPRESSION).compression(), MIN_COMPRESSION);
+
+    let mut frame = built(MIN_COMPRESSION).encoded();
+    frame[1..3].copy_from_slice(&(MIN_COMPRESSION - 1).to_le_bytes());
+    assert_eq!(TDigest::decode(&frame), Err(Refusal::Malformed));
+}
+
+// add_weighted documented its precondition and checked none of it: a NaN
+// value, an infinite or negative weight, or a total overflowing to infinity
+// went straight into the clusters and left a digest decode refuses.
+#[test]
+fn an_add_outside_the_precondition_is_refused_and_changes_nothing() {
+    let mut digest = uniform(50, 100);
+    let before = digest.clone();
+    for (value, weight, refusal) in [
+        (f64::NAN, 1.0, Refusal::NotFinite),
+        (f64::INFINITY, 1.0, Refusal::NotFinite),
+        (1.0, f64::NAN, Refusal::NotFinite),
+        (1.0, f64::INFINITY, Refusal::NotFinite),
+        (1.0, 0.0, Refusal::InvalidWeight),
+        (1.0, -2.0, Refusal::InvalidWeight),
+        (1.0, f64::MAX, Refusal::Overflow),
+    ] {
+        let mut huge = digest.clone();
+        if refusal == Refusal::Overflow {
+            assert_eq!(huge.add_weighted(2.0, f64::MAX), Ok(()));
+            let full = huge.clone();
+            assert_eq!(huge.add_weighted(value, weight), Err(refusal));
+            assert_eq!(huge, full);
+        } else {
+            assert_eq!(
+                digest.add_weighted(value, weight),
+                Err(refusal),
+                "{value} {weight}"
+            );
+            assert_eq!(digest, before);
+        }
+    }
+    assert_eq!(digest.add(f64::NEG_INFINITY), Err(Refusal::NotFinite));
+    assert_eq!(digest, before);
+}
+
+#[test]
+fn a_merge_of_another_shape_or_an_infinite_total_is_refused_and_changes_nothing() {
+    let mut digest = uniform(50, 100);
+    let before = digest.clone();
+    assert_eq!(digest.merge(&uniform(50, 200)), Err(Refusal::WrongShape));
+    assert_eq!(digest, before);
+
+    let mut heavy = built(100);
+    assert_eq!(heavy.add_weighted(1.0, f64::MAX), Ok(()));
+    let mut target = heavy.clone();
+    let full = target.clone();
+    assert_eq!(target.merge(&heavy), Err(Refusal::Overflow));
+    assert_eq!(target, full);
+}
+
+#[test]
+fn a_hand_built_centroid_is_finite_with_a_positive_weight() {
+    assert_eq!(
+        Centroid::new(1.5, 2.0),
+        Some(Centroid {
+            mean: 1.5,
+            weight: 2.0
+        })
+    );
+    for (mean, weight) in [
+        (f64::NAN, 1.0),
+        (1.0, 0.0),
+        (1.0, -1.0),
+        (1.0, f64::INFINITY),
+    ] {
+        assert_eq!(Centroid::new(mean, weight), None, "{mean} {weight}");
+    }
+}
+
+// The reference model: the exact total weight and extremes. Every refusal
+// leaves the digest equal to a clone taken before the call.
+#[test]
+fn a_random_stream_tracks_its_total_and_refusals_change_nothing() {
+    let mut digest = built(20);
+    let mut total = 0.0_f64;
+    let mut state = 0x1234_5678_9ABC_DEF0_u64;
+    for step in 0..3_000_u32 {
+        state = crate::hash::mix64(state);
+        let value = match state >> 61 {
+            0 => f64::NAN,
+            _ => f64::from(crate::hash::u64_low_u16(state)) - 30_000.0,
+        };
+        let weight = match (state >> 56) & 7 {
+            0 => 0.0,
+            1 => -1.0,
+            _ => f64::from(crate::hash::u64_low_u8(state >> 8)) + 1.0,
+        };
+        let before = digest.clone();
+        match digest.add_weighted(value, weight) {
+            Ok(()) => total += weight,
+            Err(refused) => {
+                assert_matches!(
+                    refused,
+                    Refusal::NotFinite | Refusal::InvalidWeight,
+                    "{step}"
+                );
+                assert_eq!(digest, before);
+            }
+        }
+        assert!((digest.count() - total).abs() <= total * 1e-12, "{step}");
+        assert!(digest.len() <= 200);
+    }
 }

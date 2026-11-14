@@ -1,10 +1,9 @@
 //! Ruby bindings for the `probabilistic-machines` sketches.
 //!
 //! Every sketch is sized by a const generic, so each class dispatches the size
-//! it is given to a fixed set of monomorphised variants and raises
-//! `ArgumentError` for any other size.
-
-#![allow(clippy::needless_pass_by_value)]
+//! it is given to a fixed set of monomorphised variants, listed in a class
+//! constant, and raises `RangeError` for any other size. Refusals come back as
+//! the `snake_case` symbol of the core's `Refusal` variant and never raise.
 
 mod countmin;
 mod cuckoo;
@@ -13,22 +12,17 @@ mod hyperloglog;
 mod tdigest;
 mod topk;
 
-use std::sync::OnceLock;
+use magnus::{
+    Error, Integer, RArray, RClass, RModule, Ruby, TryConvert, TypedData, Value, prelude::*,
+};
+use probabilistic_machines::Refusal;
 
-use magnus::scan_args::get_kwargs;
-use magnus::value::Opaque;
-use magnus::{Error, ExceptionClass, Integer, RHash, RModule, Ruby, TryConvert, Value, prelude::*};
-use probabilistic_machines::CodecError;
-
-/// `ProbabilisticMachines::Full`, defined in [`init`].
-static FULL: OnceLock<Opaque<ExceptionClass>> = OnceLock::new();
-
-/// A whole number of things: a count, a width, a depth, a `k`, a hash.
+/// A whole number of things: a count, a width, a depth, a hash.
 ///
 /// magnus reads an integer through Ruby's `NUM2*` family, which truncates a
 /// `Float` towards zero instead of refusing it, so an argument that means an
-/// integer is read as one of these and anything but an `Integer` is turned
-/// away. An `Integer` outside the target width still comes back as the
+/// integer is read as one of these and anything but an `Integer` raises
+/// `TypeError`. An `Integer` outside the target width still comes back as the
 /// `RangeError` magnus raises for it.
 pub(crate) struct Whole<T>(pub(crate) T);
 
@@ -53,84 +47,66 @@ fn not_whole(value: Value) -> Error {
     )
 }
 
-/// The one required keyword of a constructor.
-pub(crate) fn required_kwarg<T: TryConvert>(keywords: RHash, name: &str) -> Result<T, Error> {
-    Ok(get_kwargs::<_, (T,), (), ()>(keywords, &[name], &[])?
-        .required
-        .0)
+/// Ruby symbol of a refusal: the snake case of the core variant.
+pub(crate) fn refusal(ruby: &Ruby, refused: Refusal) -> Value {
+    ruby.to_symbol(match refused {
+        Refusal::Truncated => "truncated",
+        Refusal::WrongStructure => "wrong_structure",
+        Refusal::WrongShape => "wrong_shape",
+        Refusal::Malformed => "malformed",
+        Refusal::Full => "full",
+        Refusal::Overflow => "overflow",
+        Refusal::ZeroCount => "zero_count",
+        Refusal::NotFinite => "not_finite",
+        Refusal::InvalidWeight => "invalid_weight",
+    })
+    .as_value()
 }
 
-/// A keyword with a default the caller may leave out.
-pub(crate) fn optional_kwarg<T: TryConvert>(
-    keywords: RHash,
-    name: &str,
-) -> Result<Option<T>, Error> {
-    Ok(
-        get_kwargs::<_, (), (Option<T>,), ()>(keywords, &[], &[name])?
-            .optional
-            .0,
-    )
+/// The object a `decode` built, or the refusal symbol when its frame was
+/// refused.
+pub(crate) fn decoded_or_refused<T: TypedData>(ruby: &Ruby, outcome: Result<T, Refusal>) -> Value {
+    match outcome {
+        Ok(object) => ruby.obj_wrap(object).as_value(),
+        Err(refused) => refusal(ruby, refused),
+    }
 }
 
+/// `honoured` as a symbol when the call was honoured, its refusal otherwise.
+pub(crate) fn answer(ruby: &Ruby, outcome: Result<(), Refusal>, honoured: &str) -> Value {
+    match outcome {
+        Ok(()) => ruby.to_symbol(honoured).as_value(),
+        Err(refused) => refusal(ruby, refused),
+    }
+}
+
+/// A size this build carries no monomorphised variant for: rejected
+/// configuration, so `RangeError`.
 pub(crate) fn unsupported(ruby: &Ruby, name: &str, given: usize, supported: &[usize]) -> Error {
     Error::new(
-        ruby.exception_arg_error(),
+        ruby.exception_range_error(),
         format!("{name} {given} is not supported, expected one of {supported:?}"),
     )
 }
 
-pub(crate) fn unsupported_blob(ruby: &Ruby, name: &str, supported: &[usize]) -> Error {
-    Error::new(
-        ruby.exception_arg_error(),
-        format!("blob was written with a {name} outside {supported:?}"),
-    )
+/// The supported sizes as a frozen Array, for a class constant.
+pub(crate) fn sizes(ruby: &Ruby, supported: &[usize]) -> RArray {
+    let array = ruby.ary_from_iter(supported.iter().copied());
+    array.freeze();
+    array
 }
 
-pub(crate) fn codec_error(ruby: &Ruby, error: CodecError) -> Error {
-    Error::new(ruby.exception_arg_error(), format!("codec: {error}"))
-}
-
-pub(crate) fn mismatch(ruby: &Ruby, name: &str) -> Error {
-    Error::new(
-        ruby.exception_arg_error(),
-        format!("the other {name} has a different shape"),
-    )
-}
-
-pub(crate) fn uninitialised(ruby: &Ruby) -> Error {
-    Error::new(
-        ruby.exception_runtime_error(),
-        "the probabilistic_machines extension is not initialised",
-    )
-}
-
-pub(crate) fn defined_twice(ruby: &Ruby, name: &str) -> Error {
-    Error::new(
-        ruby.exception_runtime_error(),
-        format!("ProbabilisticMachines::{name} was initialised twice"),
-    )
-}
-
-/// `ProbabilisticMachines::Full`, raised when a cuckoo filter cannot place an
-/// item after relocating its neighbours.
-pub(crate) fn full(ruby: &Ruby) -> Error {
-    FULL.get().map_or_else(
-        || uninitialised(ruby),
-        |class| Error::new(ruby.get_inner(*class), "the filter is full"),
-    )
-}
-
-fn define_errors(ruby: &Ruby, module: RModule) -> Result<(), Error> {
-    let base = module.define_error("Error", ruby.exception_standard_error())?;
-    let full = module.define_error("Full", base)?;
-    FULL.set(full.into())
-        .map_err(|_| defined_twice(ruby, "Full"))
+/// Defines `name` under `module` with no allocator of its own, so
+/// `Class#allocate` cannot hand out an object the core never built.
+pub(crate) fn define_class(ruby: &Ruby, module: RModule, name: &str) -> Result<RClass, Error> {
+    let class = module.define_class(name, ruby.class_object())?;
+    class.undef_default_alloc_func();
+    Ok(class)
 }
 
 #[magnus::init]
 fn init(ruby: &Ruby) -> Result<(), Error> {
     let module = ruby.define_module("ProbabilisticMachines")?;
-    define_errors(ruby, module)?;
     data::define(ruby, module)?;
     hyperloglog::define(ruby, module)?;
     countmin::define(ruby, module)?;

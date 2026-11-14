@@ -36,7 +36,7 @@ jobs:
         if: steps.crates.outputs.core != ''
         working-directory: ${{ steps.crates.outputs.core }}
         run: |
-          for features in "" alloc std; do
+          for features in "" alloc; do
             echo "::group::features: ${features:-none}"
             cargo clippy --no-default-features --features "$features" --all-targets -- -D warnings
             cargo test --no-default-features --features "$features" --lib
@@ -112,4 +112,4 @@ jobs:
         run: bundle exec rake test
 
       - name: Validate signatures
-        run: bundle exec rbs -I sig validate
+        run: bundle exec rake rbs

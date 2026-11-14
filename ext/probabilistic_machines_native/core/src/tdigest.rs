@@ -2,10 +2,15 @@
 
 use alloc::vec::Vec;
 
-use crate::{CodecError, TAG_TDIGEST, open_frame, read8};
+use crate::{Refusal, TAG_TDIGEST, open_frame, read8};
 
 const HEADER_LEN: usize = 31;
 const CENTROID_LEN: usize = 16;
+
+/// Smallest compression a digest is built with. Below it a cluster may hold
+/// more than 40% of the stream around the median, so a quantile there says
+/// nothing.
+pub const MIN_COMPRESSION: u16 = 10;
 
 /// Clusters the digest may hold per unit of compression.
 const CLUSTERS_PER_COMPRESSION: usize = 10;
@@ -17,10 +22,37 @@ const CLUSTERS_PER_COMPRESSION: usize = 10;
 const WEIGHT_DRIFT: f64 = 1e-6;
 
 /// A weighted point: the mean of the values that collapsed into it.
+///
+/// Every centroid a digest holds has a finite mean and a finite, positive
+/// weight; [`new`](Self::new) holds a hand-built one to that.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Centroid {
-    pub mean: f64,
-    pub weight: f64,
+    mean: f64,
+    weight: f64,
+}
+
+impl Centroid {
+    /// A centroid, or `None` when `mean` is not finite or `weight` is not
+    /// finite and positive.
+    #[must_use]
+    pub const fn new(mean: f64, weight: f64) -> Option<Self> {
+        if !mean.is_finite() || !weight.is_finite() || weight <= 0.0 {
+            return None;
+        }
+        Some(Self { mean, weight })
+    }
+
+    /// The mean of the values that collapsed into this centroid.
+    #[must_use]
+    pub const fn mean(&self) -> f64 {
+        self.mean
+    }
+
+    /// How many values (or how much weight) collapsed into it.
+    #[must_use]
+    pub const fn weight(&self) -> f64 {
+        self.weight
+    }
 }
 
 /// Estimates quantiles from clusters whose weight is capped by how close they
@@ -38,18 +70,23 @@ pub struct Centroid {
 /// million. Below `10 * compression` points nothing is collapsed and the
 /// quantiles are exact.
 ///
+/// Every point is finite with a finite, positive weight, and the total weight
+/// stays finite: [`add_weighted`](Self::add_weighted) and
+/// [`merge`](Self::merge) refuse anything else and change nothing.
+///
 /// ```
 /// use probabilistic_machines::TDigest;
 ///
-/// let mut latency = TDigest::new(100);
+/// let mut latency = TDigest::new(100).ok_or("compression below 10")?;
 /// for ms in 1..=10_000 {
-///     latency.add(f64::from(ms));
+///     latency.add(f64::from(ms))?;
 /// }
 ///
 /// assert!((latency.quantile(0.5) - 5_000.0).abs() < 100.0);
 /// assert!((latency.quantile(0.99) - 9_900.0).abs() < 50.0);
 /// assert_eq!(latency.quantile(0.0), 1.0);
 /// assert_eq!(latency.quantile(1.0), 10_000.0);
+/// # Ok::<(), Box<dyn core::error::Error>>(())
 /// ```
 #[derive(Debug, Clone, PartialEq)]
 pub struct TDigest {
@@ -61,8 +98,17 @@ pub struct TDigest {
 }
 
 impl TDigest {
+    /// An empty digest, or `None` when `compression` is below
+    /// [`MIN_COMPRESSION`].
     #[must_use]
-    pub const fn new(compression: u16) -> Self {
+    pub const fn new(compression: u16) -> Option<Self> {
+        if compression < MIN_COMPRESSION {
+            return None;
+        }
+        Some(Self::empty(compression))
+    }
+
+    const fn empty(compression: u16) -> Self {
         Self {
             compression,
             centroids: Vec::new(),
@@ -111,18 +157,36 @@ impl TDigest {
         self.centroids.is_empty()
     }
 
-    /// Adds one observation of `value`, under the same precondition as
-    /// [`add_weighted`](Self::add_weighted).
-    pub fn add(&mut self, value: f64) {
-        self.add_weighted(value, 1.0);
+    /// Adds one observation of `value`.
+    ///
+    /// # Errors
+    ///
+    /// As [`add_weighted`](Self::add_weighted).
+    pub fn add(&mut self, value: f64) -> Result<(), Refusal> {
+        self.add_weighted(value, 1.0)
     }
 
     /// Adds a value standing for `weight` observations.
     ///
-    /// `value` must be finite, and `weight` finite and positive: the quantiles
-    /// of a stream carrying anything else mean nothing, and the clusters it
-    /// leaves are not ones [`decode`](Self::decode) reads back.
-    pub fn add_weighted(&mut self, value: f64, weight: f64) {
+    /// # Errors
+    ///
+    /// [`Refusal::NotFinite`] when `value` or `weight` is NaN or infinite,
+    /// [`Refusal::InvalidWeight`] when `weight` is zero or negative,
+    /// [`Refusal::Overflow`] when the total weight would become infinite. The
+    /// quantiles of a stream carrying any of these mean nothing, and the
+    /// clusters it would leave are not ones [`decode`](Self::decode) reads
+    /// back. The digest is unchanged.
+    pub fn add_weighted(&mut self, value: f64, weight: f64) -> Result<(), Refusal> {
+        if !value.is_finite() || !weight.is_finite() {
+            return Err(Refusal::NotFinite);
+        }
+        if weight <= 0.0 {
+            return Err(Refusal::InvalidWeight);
+        }
+        let count = self.count + weight;
+        if !count.is_finite() {
+            return Err(Refusal::Overflow);
+        }
         let at = self
             .centroids
             .partition_point(|centroid| centroid.mean < value);
@@ -133,7 +197,7 @@ impl TDigest {
                 weight,
             },
         );
-        self.count += weight;
+        self.count = count;
         if value < self.minimum {
             self.minimum = value;
         }
@@ -143,6 +207,7 @@ impl TDigest {
         if self.centroids.len() > self.capacity() {
             self.compress();
         }
+        Ok(())
     }
 
     /// Value at quantile `q`, [`f64::NAN`] when empty.
@@ -204,11 +269,26 @@ impl TDigest {
 
     /// Folds another digest in. The result is the same digest you would get by
     /// feeding one instance both streams, up to the order clusters formed in.
-    pub fn merge(&mut self, other: &Self) {
+    ///
+    /// # Errors
+    ///
+    /// [`Refusal::WrongShape`] when `other` was built with another
+    /// compression: compression only merges clusters, so a coarser digest's
+    /// clusters would break this one's weight bound, and a finer one's would
+    /// claim a precision this one does not keep. [`Refusal::Overflow`] when
+    /// the total weight would become infinite. The digest is unchanged.
+    pub fn merge(&mut self, other: &Self) -> Result<(), Refusal> {
+        if other.compression != self.compression {
+            return Err(Refusal::WrongShape);
+        }
+        let count = self.count + other.count;
+        if !count.is_finite() {
+            return Err(Refusal::Overflow);
+        }
         self.centroids.extend_from_slice(&other.centroids);
         self.centroids
             .sort_unstable_by(|left, right| left.mean.total_cmp(&right.mean));
-        self.count += other.count;
+        self.count = count;
         if other.minimum < self.minimum {
             self.minimum = other.minimum;
         }
@@ -216,6 +296,7 @@ impl TDigest {
             self.maximum = other.maximum;
         }
         self.compress();
+        Ok(())
     }
 
     /// Collapses adjacent clusters up to the weight their quantile allows.
@@ -248,13 +329,11 @@ impl TDigest {
         // A cluster holding nearly all the weight pins every later rank at 1.0,
         // where the scale function above can merge nothing.
         while self.centroids.len() > self.capacity() {
-            self.centroids = self
-                .centroids
-                .chunks(2)
-                .map(|pair| match pair {
-                    [left, right] => fold(*left, *right),
-                    _ => pair[0],
-                })
+            let (pairs, odd) = self.centroids.as_chunks::<2>();
+            self.centroids = pairs
+                .iter()
+                .map(|&[left, right]| fold(left, right))
+                .chain(odd.iter().copied())
                 .collect();
         }
     }
@@ -273,23 +352,16 @@ impl TDigest {
     ///
     /// # Errors
     ///
-    /// [`CodecError::Truncated`] when `out` is shorter than
+    /// [`Refusal::Truncated`] when `out` is shorter than
     /// [`encoded_len`](Self::encoded_len).
-    pub fn encode(&self, out: &mut [u8]) -> Result<usize, CodecError> {
-        let length = self.encoded_len();
-        let Some(frame) = out.get_mut(..length) else {
-            return Err(CodecError::Truncated);
-        };
-        self.write_frame(frame);
-        Ok(length)
+    pub fn encode(&self, out: &mut [u8]) -> Result<usize, Refusal> {
+        crate::encode_frame(out, self.encoded_len(), |frame| self.write_frame(frame))
     }
 
     /// The digest's frame, exactly [`encoded_len`](Self::encoded_len) bytes.
     #[must_use]
     pub fn encoded(&self) -> alloc::boxed::Box<[u8]> {
-        let mut frame = alloc::vec![0_u8; self.encoded_len()].into_boxed_slice();
-        self.write_frame(&mut frame);
-        frame
+        crate::encoded_frame(self.encoded_len(), |frame| self.write_frame(frame))
     }
 
     /// Fills a frame of exactly [`encoded_len`](Self::encoded_len) bytes.
@@ -317,23 +389,26 @@ impl TDigest {
     ///
     /// # Errors
     ///
-    /// [`CodecError::Truncated`] when `bytes` is shorter than a header or than
+    /// [`Refusal::Truncated`] when `bytes` is shorter than a header or than
     /// the clusters that header counts,
-    /// [`CodecError::Tag`] when it holds another structure,
-    /// [`CodecError::Parameters`] when the clusters, the total weight and the
-    /// extremes contradict each other.
-    pub fn decode(bytes: &[u8]) -> Result<Self, CodecError> {
+    /// [`Refusal::WrongStructure`] when it holds another structure,
+    /// [`Refusal::Malformed`] when its compression is below
+    /// [`MIN_COMPRESSION`] or the clusters, the total weight and the extremes
+    /// contradict each other.
+    pub fn decode(bytes: &[u8]) -> Result<Self, Refusal> {
         let header = open_frame(bytes, HEADER_LEN, TAG_TDIGEST)?;
         let counted = u32::from_le_bytes([header[3], header[4], header[5], header[6]]);
         let Ok(clusters) = usize::try_from(counted) else {
-            return Err(CodecError::Truncated);
+            return Err(Refusal::Truncated);
         };
         if (bytes.len() - HEADER_LEN) / CENTROID_LEN < clusters {
-            return Err(CodecError::Truncated);
+            return Err(Refusal::Truncated);
         }
         let body = &bytes[HEADER_LEN..HEADER_LEN + clusters * CENTROID_LEN];
 
-        let mut digest = Self::new(u16::from_le_bytes([header[1], header[2]]));
+        let Some(mut digest) = Self::new(u16::from_le_bytes([header[1], header[2]])) else {
+            return Err(Refusal::Malformed);
+        };
         digest.count = f64::from_le_bytes(read8(&header[7..15]));
         digest.minimum = f64::from_le_bytes(read8(&header[15..23]));
         digest.maximum = f64::from_le_bytes(read8(&header[23..31]));
@@ -348,7 +423,7 @@ impl TDigest {
         if digest.is_coherent() {
             Ok(digest)
         } else {
-            Err(CodecError::Parameters)
+            Err(Refusal::Malformed)
         }
     }
 
@@ -381,10 +456,9 @@ impl TDigest {
             && last.mean <= self.maximum
     }
 
-    /// Clusters held before compression runs, and never below the one cluster
-    /// folding cannot reduce further.
+    /// Clusters held before compression runs.
     fn capacity(&self) -> usize {
-        (usize::from(self.compression) * CLUSTERS_PER_COMPRESSION).max(1)
+        usize::from(self.compression) * CLUSTERS_PER_COMPRESSION
     }
 }
 
@@ -393,12 +467,6 @@ impl TDigest {
 /// Interpolating at half scale keeps the span of two opposite-sign extremes
 /// inside the finite range, and doubling a mean that lies between two finite
 /// means cannot leave it.
-// Clippy only suggests `mul_add` when `std` provides it; `core` has no
-// `f64::mul_add`, so the suggestion would break the `no_std` build.
-#[cfg_attr(
-    feature = "std",
-    expect(clippy::suboptimal_flops, reason = "mul_add is std-only")
-)]
 fn fold(left: Centroid, right: Centroid) -> Centroid {
     let weight = left.weight + right.weight;
     let low = left.mean * 0.5;
@@ -416,12 +484,6 @@ fn fold(left: Centroid, right: Centroid) -> Centroid {
 /// halved the way [`fold`] averages, which costs nothing while the halves stay
 /// normal but rounds a subnormal span to zero, so the span is only halved when
 /// it does not fit.
-// Clippy only suggests `mul_add` when `std` provides it; `core` has no
-// `f64::mul_add`, so the suggestion would break the `no_std` build.
-#[cfg_attr(
-    feature = "std",
-    expect(clippy::suboptimal_flops, reason = "mul_add is std-only")
-)]
 fn lerp(at: f64, low_x: f64, low_y: f64, high_x: f64, high_y: f64) -> f64 {
     if high_x <= low_x {
         return high_y;

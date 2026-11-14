@@ -4,76 +4,97 @@ require 'test_helper'
 
 module ProbabilisticMachines
   class CuckooFilterTest < Minitest::Test
-    def test_every_supported_bucket_count_is_monomorphised
-      [1024, 4096, 16_384, 65_536].each do |buckets|
-        filter = CuckooFilter.new(buckets: buckets)
+    def test_exactly_the_supported_bucket_counts_are_monomorphised
+      assert_equal [1024, 4096, 16_384, 65_536], CuckooFilter::BUCKETS
+      CuckooFilter::BUCKETS.each do |buckets|
+        filter = CuckooFilter.new(buckets)
 
         assert_equal buckets, filter.buckets
         assert_equal buckets * 4, filter.capacity
       end
-    end
 
-    def test_an_unsupported_bucket_count_is_rejected
       [2, 512, 2048, 131_072].each do |buckets|
-        assert_raises(ArgumentError) { CuckooFilter.new(buckets: buckets) }
+        assert_raises(RangeError) { CuckooFilter.new(buckets) }
       end
-      assert_raises(ArgumentError) { CuckooFilter.new }
+      assert_raises(TypeError) { CuckooFilter.new(nil) }
     end
 
     def test_an_inserted_item_is_never_missing
-      filter = CuckooFilter.new(buckets: 4096)
+      filter = CuckooFilter.new(4096)
       keys = Array.new(2_000) { |id| "device-#{id}" }
-      keys.each { |key| assert filter.insert(key) }
+      keys.each { |key| assert_equal :inserted, filter.insert(key) }
 
       assert_equal 2_000, filter.size
-      keys.each { |key| assert_includes filter, key }
+      keys.each { |key| assert filter.contains?(key) }
     end
 
-    def test_contains_is_the_same_question_as_include
-      filter = CuckooFilter.new(buckets: 1024)
-      filter.insert('device-9')
+    def test_hashes_are_items_of_their_own
+      filter = CuckooFilter.new(1024)
 
-      assert_operator filter, :contains?, 'device-9'
-      refute_operator filter, :contains?, 'device-8'
+      assert_equal :inserted, filter.insert_hash(99)
+      assert filter.contains_hash?(99)
+      assert_equal :cleared, filter.remove_hash(99)
+      refute filter.contains_hash?(99)
+      assert_equal :not_held, filter.remove_hash(99)
     end
 
-    def test_remove_forgets_the_item
-      filter = CuckooFilter.new(buckets: 1024)
+    def test_remove_clears_one_copy_and_a_repeat_is_not_held
+      filter = CuckooFilter.new(1024)
+      filter.insert('device-9')
       filter.insert('device-9')
 
-      assert filter.remove('device-9')
-      refute_includes filter, 'device-9'
+      assert_equal :cleared, filter.remove('device-9')
+      assert filter.contains?('device-9')
+      assert_equal :cleared, filter.remove('device-9')
+      refute filter.contains?('device-9')
       assert_predicate filter, :empty?
-      refute filter.remove('device-9')
+
+      before = filter.encoded
+
+      assert_equal :not_held, filter.remove('device-9')
+      assert_equal before, filter.encoded
     end
 
-    def test_a_full_filter_raises
-      filter = CuckooFilter.new(buckets: 1024)
+    def test_a_full_filter_refuses_and_changes_nothing
+      filter = CuckooFilter.new(1024)
+      id = 0
+      id += 1 while filter.insert("device-#{id}") == :inserted
+      before = filter.encoded
 
-      assert_raises(Full) do
-        10_000.times { |id| filter.insert("device-#{id}") }
-      end
+      assert_equal :full, filter.insert("device-#{id}")
+      assert_equal before, filter.encoded
       assert_operator filter.size, :<=, filter.capacity
     end
 
-    def test_dump_load_round_trips
-      filter = CuckooFilter.new(buckets: 1024)
+    def test_encoded_decode_round_trips
+      filter = CuckooFilter.new(1024)
       100.times { |id| filter.insert("device-#{id}") }
-      blob = filter.dump
+      blob = filter.encoded
 
       assert_equal Encoding::BINARY, blob.encoding
       assert_equal 2 + (1024 * 4), blob.bytesize
 
-      restored = CuckooFilter.load(blob)
+      restored = CuckooFilter.decode(blob)
 
       assert_equal [1024, 100], [restored.buckets, restored.size]
-      100.times { |id| assert_includes restored, "device-#{id}" }
+      100.times { |id| assert restored.contains?("device-#{id}") }
     end
 
-    def test_load_rejects_a_blob_it_did_not_write
-      assert_raises(ArgumentError) { CuckooFilter.load('') }
-      assert_raises(ArgumentError) { CuckooFilter.load(HyperLogLog.new(registers: 1024).dump) }
-      assert_raises(ArgumentError) { CuckooFilter.load("\xf1\x0b".b + ("\x00".b * 8_192)) }
+    def test_decode_answers_refusal_symbols
+      assert_equal :truncated, CuckooFilter.decode('')
+      assert_equal :wrong_structure, CuckooFilter.decode("\xa1\x0a".b + ("\x00".b * 4_096))
+      assert_equal :wrong_shape, CuckooFilter.decode("\xf1\x0b".b + ("\x00".b * 8_192))
+    end
+
+    def test_decode_into_reads_over_the_receiver_or_changes_nothing
+      filter = CuckooFilter.new(1024)
+      filter.insert('mine')
+      before = filter.encoded
+
+      assert_equal :wrong_shape, filter.decode_into(CuckooFilter.new(4096).encoded)
+      assert_equal before, filter.encoded
+      assert_equal :decoded, filter.decode_into(CuckooFilter.new(1024).encoded)
+      assert_predicate filter, :empty?
     end
   end
 end
