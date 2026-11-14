@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.5.0](https://github.com/seuros/probabilistic_machines/compare/probabilistic_machines/v0.4.0...probabilistic_machines/v0.5.0) (2026-11-14)
+
+
+### ⚠ BREAKING CHANGES
+
+* adopt matryona 0.4 utf8_with so key errors name the received class
+
+### Features
+
+* adopt matryona 0.4 utf8_with so key errors name the received class ([b6e8546](https://github.com/seuros/probabilistic_machines/commit/b6e85463277321ac5363720bb94b1dc51d4adff6))
+
 ## [0.4.0](https://github.com/seuros/probabilistic_machines/compare/probabilistic_machines/v0.3.0...probabilistic_machines/v0.4.0) (2026-11-14)
 
 
