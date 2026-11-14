@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.4.0](https://github.com/seuros/probabilistic_machines/compare/probabilistic-machines-v0.3.1...probabilistic-machines-v0.4.0) (2026-11-14)
+
+
+### ⚠ BREAKING CHANGES
+
+* private Hitter/Centroid fields, refuse non-UTF-8 keys and non-canonical HeavyHitters frames, sealed exact-class values
+
+### Features
+
+* private Hitter/Centroid fields, refuse non-UTF-8 keys and non-canonical HeavyHitters frames, sealed exact-class values ([acbb087](https://github.com/seuros/probabilistic_machines/commit/acbb0872a0c7fb67bffab4fca2859b40019650d0))
+
 ## [0.3.1](https://github.com/seuros/probabilistic_machines/compare/probabilistic-machines-v0.3.0...probabilistic-machines-v0.3.1) (2026-11-06)
 
 
