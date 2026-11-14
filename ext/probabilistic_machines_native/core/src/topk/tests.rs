@@ -2,6 +2,7 @@ use super::Hitter;
 use super::{HEADER_LEN, HeavyHitters, OVERESTIMATE_AT, RECORD_LEN};
 use crate::Refusal;
 use crate::hash::mix64;
+use matryona_machines::testing::refuses;
 
 #[test]
 fn a_key_above_one_over_k_is_always_tracked() {
@@ -127,11 +128,9 @@ fn a_key_both_sides_track_takes_no_floor() {
 fn an_addition_past_u64_is_refused_and_changes_nothing() {
     let mut table = HeavyHitters::<u8, 2>::new();
     assert_eq!(table.add_count(1, u64::MAX), Ok(()));
-    let before = table.clone();
 
-    assert_eq!(table.add_count(1, 1), Err(Refusal::Overflow));
-    assert_eq!(table.add_count(2, 1), Err(Refusal::Overflow));
-    assert_eq!(table, before);
+    refuses(&mut table, Refusal::Overflow, |t| t.add_count(1, 1));
+    refuses(&mut table, Refusal::Overflow, |t| t.add_count(2, 1));
     assert_eq!(table.count(&1), u64::MAX);
 }
 
@@ -141,10 +140,8 @@ fn an_eviction_past_u64_is_refused_and_changes_nothing() {
     assert_eq!(table.add_count(1, u64::MAX - 1), Ok(()));
     let mut other = HeavyHitters::<u8, 1>::new();
     assert_eq!(other.add_count(2, 2), Ok(()));
-    let before = table.clone();
 
-    assert_eq!(table.merge(&other), Err(Refusal::Overflow));
-    assert_eq!(table, before);
+    refuses(&mut table, Refusal::Overflow, |t| t.merge(&other));
 }
 
 #[test]
@@ -157,10 +154,8 @@ fn a_merge_whose_floor_overflows_is_refused_and_changes_nothing() {
     let before = table.clone();
     let mut doubled = table.clone();
     assert_eq!(doubled.add_count(1, u64::MAX / 2), Ok(()));
-    let before_doubled = doubled.clone();
 
-    assert_eq!(doubled.merge(&other), Err(Refusal::Overflow));
-    assert_eq!(doubled, before_doubled);
+    refuses(&mut doubled, Refusal::Overflow, |d| d.merge(&other));
     assert_eq!(table, before);
 }
 
@@ -171,10 +166,8 @@ fn a_zero_count_is_refused_and_evicts_nothing() {
     let mut table = HeavyHitters::<u8, 2>::new();
     assert_eq!(table.add_count(1, 3), Ok(()));
     assert_eq!(table.add_count(2, 4), Ok(()));
-    let before = table.clone();
 
-    assert_eq!(table.add_count(3, 0), Err(Refusal::ZeroCount));
-    assert_eq!(table, before);
+    refuses(&mut table, Refusal::ZeroCount, |t| t.add_count(3, 0));
 }
 
 #[test]
@@ -378,8 +371,7 @@ fn bytes_past_the_tracked_records_are_refused() {
         let mut stray = frame;
         stray[at] = 1;
         let mut held = table.clone();
-        assert_eq!(held.decode_into(&stray), Err(Refusal::Malformed), "{at}");
-        assert_eq!(held, table);
+        refuses(&mut held, Refusal::Malformed, |h| h.decode_into(&stray));
     }
 }
 

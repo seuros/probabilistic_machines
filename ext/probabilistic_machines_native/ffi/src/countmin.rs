@@ -3,10 +3,11 @@
 use std::cell::RefCell;
 
 use magnus::typed_data::Obj;
-use magnus::{Error, RModule, RString, Ruby, Value, function, method, prelude::*};
+use magnus::{Error, RModule, RString, Ruby, TryConvert, Value, function, method, prelude::*};
+use matryona_machines::ruby::integer;
 use probabilistic_machines::{CountMinSketch, Refusal};
 
-use crate::{Whole, answer, decoded_or_refused, define_class, sizes, unsupported};
+use crate::{Pinned, answer, decoded_or_refused, define_class, partner, sizes, unsupported};
 
 /// Row widths [`Sketch`] is monomorphised for.
 ///
@@ -37,6 +38,9 @@ macro_rules! sketch {
         }
     };
 }
+
+/// The class, pinned at init.
+static CLASS: Pinned = Pinned::new("probabilistic_machines");
 
 #[magnus::wrap(
     class = "ProbabilisticMachines::CountMinSketch",
@@ -84,11 +88,8 @@ fn decoded(frame: &[u8]) -> Result<Sketch, Refusal> {
 impl Wrapper {
     /// `CountMinSketch.new(width, depth)`. `RangeError` outside [`WIDTHS`] by
     /// [`DEPTHS`].
-    fn new(
-        ruby: &Ruby,
-        Whole(width): Whole<usize>,
-        Whole(depth): Whole<usize>,
-    ) -> Result<Self, Error> {
+    fn new(ruby: &Ruby, width: Value, depth: Value) -> Result<Self, Error> {
+        let (width, depth): (usize, usize) = (integer(width, "width")?, integer(depth, "depth")?);
         if !WIDTHS.contains(&width) {
             return Err(unsupported(ruby, "width", width, &WIDTHS));
         }
@@ -108,9 +109,9 @@ impl Wrapper {
         decoded_or_refused(ruby, decoded(&bytes).map(|held| Self(RefCell::new(held))))
     }
 
-    fn decode_into(ruby: &Ruby, this: Obj<Self>, bytes: RString) -> Result<Value, Error> {
-        let bytes = bytes.to_bytes();
+    fn decode_into(ruby: &Ruby, this: Obj<Self>, bytes: Value) -> Result<Value, Error> {
         this.check_frozen()?;
+        let bytes = RString::try_convert(bytes)?.to_bytes();
         let outcome = sketch!(&mut *this.0.borrow_mut(), |sketch| sketch
             .decode_into(&bytes));
         Ok(answer(ruby, outcome, "decoded"))
@@ -124,21 +125,17 @@ impl Wrapper {
         sketch!(&*self.0.borrow(), |sketch| depth_of(&**sketch))
     }
 
-    fn add(ruby: &Ruby, this: Obj<Self>, item: RString) -> Result<Value, Error> {
-        let item = item.to_bytes();
+    fn add(ruby: &Ruby, this: Obj<Self>, item: Value) -> Result<Value, Error> {
         this.check_frozen()?;
+        let item = RString::try_convert(item)?.to_bytes();
         let outcome = sketch!(&mut *this.0.borrow_mut(), |sketch| sketch.add(&item));
         Ok(answer(ruby, outcome, "added"))
     }
 
-    fn add_count(
-        ruby: &Ruby,
-        this: Obj<Self>,
-        item: RString,
-        Whole(count): Whole<u32>,
-    ) -> Result<Value, Error> {
-        let item = item.to_bytes();
+    fn add_count(ruby: &Ruby, this: Obj<Self>, item: Value, count: Value) -> Result<Value, Error> {
         this.check_frozen()?;
+        let item = RString::try_convert(item)?.to_bytes();
+        let count: u32 = integer(count, "count")?;
         let outcome = sketch!(&mut *this.0.borrow_mut(), |sketch| sketch
             .add_count(&item, count));
         Ok(answer(ruby, outcome, "added"))
@@ -147,10 +144,12 @@ impl Wrapper {
     fn add_hash_count(
         ruby: &Ruby,
         this: Obj<Self>,
-        Whole(hash): Whole<u64>,
-        Whole(count): Whole<u32>,
+        hash: Value,
+        count: Value,
     ) -> Result<Value, Error> {
         this.check_frozen()?;
+        let hash: u64 = integer(hash, "hash")?;
+        let count: u32 = integer(count, "count")?;
         let outcome = sketch!(&mut *this.0.borrow_mut(), |sketch| sketch
             .add_hash_count(hash, count));
         Ok(answer(ruby, outcome, "added"))
@@ -161,8 +160,9 @@ impl Wrapper {
         sketch!(&*self.0.borrow(), |sketch| sketch.estimate(&item))
     }
 
-    fn estimate_hash(&self, Whole(hash): Whole<u64>) -> u32 {
-        sketch!(&*self.0.borrow(), |sketch| sketch.estimate_hash(hash))
+    fn estimate_hash(&self, hash: Value) -> Result<u32, Error> {
+        let hash = integer(hash, "hash")?;
+        Ok(sketch!(&*self.0.borrow(), |sketch| sketch.estimate_hash(hash)))
     }
 
     fn total(&self) -> u64 {
@@ -171,8 +171,10 @@ impl Wrapper {
 
     /// `:merged`, `:overflow`, or `:wrong_shape` for a sketch of another
     /// width or depth (in Rust that merge does not compile).
-    fn merge(ruby: &Ruby, this: Obj<Self>, other: &Self) -> Result<Value, Error> {
+    fn merge(ruby: &Ruby, this: Obj<Self>, other: Value) -> Result<Value, Error> {
         this.check_frozen()?;
+        let message = "other must be a ProbabilisticMachines::CountMinSketch";
+        let other: Obj<Self> = partner(ruby, &CLASS, other, message)?;
         let source = other.0.borrow().clone();
         let merged = match (&mut *this.0.borrow_mut(), &source) {
             (Sketch::W1024D4(target), Sketch::W1024D4(source)) => target.merge(source),
@@ -203,7 +205,7 @@ impl Wrapper {
 }
 
 pub fn define(ruby: &Ruby, module: RModule) -> Result<(), Error> {
-    let class = define_class(ruby, module, "CountMinSketch")?;
+    let class = define_class(ruby, module, "CountMinSketch", &CLASS)?;
     class.const_set("WIDTHS", sizes(ruby, &WIDTHS))?;
     class.const_set("DEPTHS", sizes(ruby, &DEPTHS))?;
     class.define_singleton_method("new", function!(Wrapper::new, 2))?;

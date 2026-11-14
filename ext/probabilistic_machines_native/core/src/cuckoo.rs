@@ -65,6 +65,7 @@ impl<const B: usize> CuckooFilter<B> {
     /// Length of the [`encode`](Self::encode) frame.
     pub const ENCODED_LEN: usize = 2 + B * SLOTS;
 
+    /// An empty filter.
     #[must_use]
     pub const fn new() -> Self {
         Self {
@@ -79,6 +80,7 @@ impl<const B: usize> CuckooFilter<B> {
         self.items
     }
 
+    /// Whether the filter holds no item.
     #[must_use]
     pub const fn is_empty(&self) -> bool {
         self.items == 0
@@ -134,6 +136,7 @@ impl<const B: usize> CuckooFilter<B> {
         Err(Refusal::Full)
     }
 
+    /// Whether `item` may be held: no false negatives, rare false positives.
     #[must_use]
     pub fn contains(&self, item: &[u8]) -> bool {
         self.contains_hash(hash64(item))

@@ -30,6 +30,24 @@ module ProbabilisticMachines
       end
     end
 
+    # Frozen is checked before any argument is read, as Ruby's own methods do.
+    def test_a_frozen_sketch_given_a_bad_argument_raises_frozen_error
+      bad = {
+        HyperLogLog.new(1024) => %i[add add_hash merge decode_into],
+        CountMinSketch.new(1024, 4) => %i[add add_count add_hash_count merge decode_into],
+        CuckooFilter.new(1024) => %i[insert insert_hash remove remove_hash decode_into],
+        HeavyHitters.new(16) => %i[add add_count merge decode_into],
+        TDigest.new(100) => %i[add add_weighted merge]
+      }
+      bad.each do |sketch, names|
+        sketch.freeze
+        names.each do |name|
+          arguments = Array.new(sketch.method(name).arity, :bad)
+          assert_raises(FrozenError, "#{sketch.class}##{name}") { sketch.public_send(name, *arguments) }
+        end
+      end
+    end
+
     # Sealing stops accidents, not reflection: Ruby binds a named subclass's
     # constant before `inherited` raises, so the class leaks. Both forms raise.
     def test_values_are_sealed_and_a_named_subclass_leaks_its_constant
@@ -49,6 +67,21 @@ module ProbabilisticMachines
       assert_raises(TypeError) { digest.add_weighted(1.0, edited) }
       assert_raises(TypeError) { HeavyHitters.new(16).add(Hitter.new('k', 2, 1)) }
       assert digest.empty?
+    end
+
+    # A merge partner is checked natively for exactly the sketch's class (no
+    # subclass instance), against the class pinned at init: compaction moves
+    # nothing it holds.
+    def test_a_merge_partner_is_exactly_the_sketch_class
+      GC.verify_compaction_references(expand_heap: true, toward: :empty)
+      partners = { HyperLogLog.new(1024) => HyperLogLog.new(1024), CountMinSketch.new(1024, 4) => CountMinSketch.new(1024, 4),
+                   HeavyHitters.new(16) => HeavyHitters.new(16), TDigest.new(100) => TDigest.new(100) }
+      partners.each do |sketch, partner|
+        assert_equal :merged, sketch.merge(partner)
+        error = assert_raises(TypeError) { sketch.merge(CuckooFilter.new(1024)) }
+        assert_equal "other must be a #{sketch.class}", error.message
+        assert_raises(TypeError) { sketch.merge(:bad) }
+      end
     end
 
     # The classes are resolved at init and pinned, so a compaction moves none

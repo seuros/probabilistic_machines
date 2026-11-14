@@ -135,6 +135,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "matryona-machines"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "39ad8da938bf6f8b71d39da51cff79a602a948665a542f575db7f4cb63877215"
+dependencies = [
+ "magnus",
+]
+
+[[package]]
 name = "memchr"
 version = "2.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -160,6 +169,7 @@ dependencies = [
 name = "probabilistic-machines"
 version = "0.4.0"
 dependencies = [
+ "matryona-machines",
  "sliderule-machines",
 ]
 
@@ -168,6 +178,7 @@ name = "probabilistic_machines_native"
 version = "0.1.4"
 dependencies = [
  "magnus",
+ "matryona-machines",
  "probabilistic-machines",
  "rb-sys",
 ]

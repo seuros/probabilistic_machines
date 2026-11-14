@@ -105,6 +105,7 @@ impl<T: Clone + Eq, const K: usize> HeavyHitters<T, K> {
     /// error rather than one that silently drops every key.
     const AT_LEAST_ONE_COUNTER: () = assert!(K >= 1, "a table needs at least one counter");
 
+    /// An empty table: every counter free.
     #[must_use]
     pub const fn new() -> Self {
         let () = Self::AT_LEAST_ONE_COUNTER;
@@ -126,6 +127,7 @@ impl<T: Clone + Eq, const K: usize> HeavyHitters<T, K> {
         self.slots.iter().flatten().count()
     }
 
+    /// Whether the table tracks no key.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.slots.iter().all(Option::is_none)

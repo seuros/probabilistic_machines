@@ -1,6 +1,7 @@
 use super::CountMinSketch;
 use crate::Refusal;
 use crate::hash::mix64;
+use matryona_machines::testing::refuses;
 
 fn key(index: u32) -> [u8; 8] {
     mix64(u64::from(index)).to_le_bytes()
@@ -150,10 +151,8 @@ fn a_single_row_still_counts() {
 fn an_addition_past_a_full_counter_is_refused_and_changes_nothing() {
     let mut sketch = CountMinSketch::<32, 3>::new();
     assert_eq!(sketch.add_count(b"x", u32::MAX), Ok(()));
-    let before = sketch.clone();
 
-    assert_eq!(sketch.add(b"x"), Err(Refusal::Overflow));
-    assert_eq!(sketch, before);
+    refuses(&mut sketch, Refusal::Overflow, |s| s.add(b"x"));
     assert_eq!(sketch.estimate(b"x"), u32::MAX);
     assert_eq!(sketch.total(), u64::from(u32::MAX));
 }
@@ -164,21 +163,17 @@ fn a_merge_past_a_full_counter_is_refused_and_changes_nothing() {
     assert_eq!(sketch.add_count(b"hot", u32::MAX), Ok(()));
     let mut other = CountMinSketch::<16, 2>::new();
     assert_eq!(other.add(b"hot"), Ok(()));
-    let before = sketch.clone();
 
-    assert_eq!(sketch.merge(&other), Err(Refusal::Overflow));
-    assert_eq!(sketch, before);
+    refuses(&mut sketch, Refusal::Overflow, |s| s.merge(&other));
 }
 
 #[test]
 fn a_zero_count_is_refused_and_changes_nothing() {
     let mut sketch = CountMinSketch::<32, 3>::new();
     assert_eq!(sketch.add_count(b"x", 4), Ok(()));
-    let before = sketch.clone();
 
-    assert_eq!(sketch.add_count(b"x", 0), Err(Refusal::ZeroCount));
-    assert_eq!(sketch.add_hash_count(7, 0), Err(Refusal::ZeroCount));
-    assert_eq!(sketch, before);
+    refuses(&mut sketch, Refusal::ZeroCount, |s| s.add_count(b"x", 0));
+    refuses(&mut sketch, Refusal::ZeroCount, |s| s.add_hash_count(7, 0));
 }
 
 // The reference model: exact per-item counts, and the sketch's guarantees

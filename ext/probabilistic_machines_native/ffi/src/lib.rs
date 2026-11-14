@@ -9,58 +9,47 @@ mod countmin;
 mod cuckoo;
 mod data;
 mod hyperloglog;
+mod init;
 mod tdigest;
 mod topk;
 
-use magnus::{
-    Error, Integer, RArray, RClass, RModule, Ruby, TryConvert, TypedData, Value, prelude::*,
-};
+use magnus::{Error, RArray, RClass, RModule, Ruby, TypedData, Value, prelude::*, typed_data::Obj};
+use matryona_machines::ruby::{Class, Registry, Symbols, exact_typed, symbol};
 use probabilistic_machines::Refusal;
 
-/// A whole number of things: a count, a width, a depth, a hash.
-///
-/// magnus reads an integer through Ruby's `NUM2*` family, which truncates a
-/// `Float` towards zero instead of refusing it, so an argument that means an
-/// integer is read as one of these and anything but an `Integer` raises
-/// `TypeError`. An `Integer` outside the target width still comes back as the
-/// `RangeError` magnus raises for it.
-pub(crate) struct Whole<T>(pub(crate) T);
-
-impl<T: TryConvert> TryConvert for Whole<T> {
-    fn try_convert(value: Value) -> Result<Self, Error> {
-        if Integer::from_value(value).is_none() {
-            return Err(not_whole(value));
-        }
-        T::try_convert(value).map(Self)
+matryona_machines::symbols! {
+    /// The core's refusals, each the snake case of its variant.
+    Refusals for Refusal as "a refusal" {
+        Truncated => "truncated",
+        WrongStructure => "wrong_structure",
+        WrongShape => "wrong_shape",
+        Malformed => "malformed",
+        Full => "full",
+        Overflow => "overflow",
+        ZeroCount => "zero_count",
+        NotFinite => "not_finite",
+        InvalidWeight => "invalid_weight",
     }
-}
-
-fn not_whole(value: Value) -> Error {
-    let ruby = Ruby::get_with(value);
-    Error::new(
-        ruby.exception_type_error(),
-        format!(
-            "no implicit conversion of {} into Integer: {}",
-            value.class(),
-            value.inspect()
-        ),
-    )
 }
 
 /// Ruby symbol of a refusal: the snake case of the core variant.
 pub(crate) fn refusal(ruby: &Ruby, refused: Refusal) -> Value {
-    ruby.to_symbol(match refused {
-        Refusal::Truncated => "truncated",
-        Refusal::WrongStructure => "wrong_structure",
-        Refusal::WrongShape => "wrong_shape",
-        Refusal::Malformed => "malformed",
-        Refusal::Full => "full",
-        Refusal::Overflow => "overflow",
-        Refusal::ZeroCount => "zero_count",
-        Refusal::NotFinite => "not_finite",
-        Refusal::InvalidWeight => "invalid_weight",
-    })
-    .as_value()
+    Refusals::symbol(ruby, refused).as_value()
+}
+
+/// A sketch class the binding defined, pinned at init so a merge can check
+/// its partner's exact class without looking it up by name.
+pub(crate) type Pinned = Registry<Class>;
+
+/// The other operand of a merge: a `T` that is an instance of exactly the
+/// class pinned in `held`, never a subclass instance. `TypeError` otherwise.
+pub(crate) fn partner<T: TypedData>(
+    ruby: &Ruby,
+    held: &Pinned,
+    other: Value,
+    message: &'static str,
+) -> Result<Obj<T>, Error> {
+    exact_typed(ruby, other, held.get(ruby)?.get(ruby), message)
 }
 
 /// The object a `decode` built, or the refusal symbol when its frame was
@@ -75,7 +64,7 @@ pub(crate) fn decoded_or_refused<T: TypedData>(ruby: &Ruby, outcome: Result<T, R
 /// `honoured` as a symbol when the call was honoured, its refusal otherwise.
 pub(crate) fn answer(ruby: &Ruby, outcome: Result<(), Refusal>, honoured: &str) -> Value {
     match outcome {
-        Ok(()) => ruby.to_symbol(honoured).as_value(),
+        Ok(()) => symbol(ruby, honoured).as_value(),
         Err(refused) => refusal(ruby, refused),
     }
 }
@@ -97,20 +86,16 @@ pub(crate) fn sizes(ruby: &Ruby, supported: &[usize]) -> RArray {
 }
 
 /// Defines `name` under `module` with no allocator of its own, so
-/// `Class#allocate` cannot hand out an object the core never built.
-pub(crate) fn define_class(ruby: &Ruby, module: RModule, name: &str) -> Result<RClass, Error> {
+/// `Class#allocate` cannot hand out an object the core never built, and pins
+/// it into `held` (no lookup back by name).
+pub(crate) fn define_class(
+    ruby: &Ruby,
+    module: RModule,
+    name: &str,
+    held: &Pinned,
+) -> Result<RClass, Error> {
     let class = module.define_class(name, ruby.class_object())?;
     class.undef_default_alloc_func();
+    held.set(ruby, Class::pin(ruby, class))?;
     Ok(class)
-}
-
-#[magnus::init]
-fn init(ruby: &Ruby) -> Result<(), Error> {
-    let module = ruby.define_module("ProbabilisticMachines")?;
-    data::define(ruby, module)?;
-    hyperloglog::define(ruby, module)?;
-    countmin::define(ruby, module)?;
-    tdigest::define(ruby, module)?;
-    cuckoo::define(ruby, module)?;
-    topk::define(ruby, module)
 }

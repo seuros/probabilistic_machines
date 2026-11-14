@@ -3,10 +3,11 @@
 use std::cell::RefCell;
 
 use magnus::typed_data::Obj;
-use magnus::{Error, RModule, RString, Ruby, Value, function, method, prelude::*};
+use magnus::{Error, RModule, RString, Ruby, TryConvert, Value, function, method, prelude::*};
+use matryona_machines::ruby::{Symbols, integer};
 use probabilistic_machines::{CuckooFilter, Refusal, Removing};
 
-use crate::{Whole, answer, decoded_or_refused, define_class, sizes, unsupported};
+use crate::{Pinned, answer, decoded_or_refused, define_class, sizes, unsupported};
 
 /// Bucket counts [`Filter`] is monomorphised for.
 const BUCKETS: [usize; 4] = [1024, 4096, 16384, 65536];
@@ -29,6 +30,9 @@ macro_rules! filter {
         }
     };
 }
+
+/// The class, pinned at init.
+static CLASS: Pinned = Pinned::new("probabilistic_machines");
 
 #[magnus::wrap(class = "ProbabilisticMachines::CuckooFilter", free_immediately, size)]
 struct Wrapper(RefCell<Filter>);
@@ -67,18 +71,23 @@ fn decoded(frame: &[u8]) -> Result<Filter, Refusal> {
     })
 }
 
+matryona_machines::symbols! {
+    /// What an honoured removal answers.
+    Removings for Removing as "a removal" {
+        Cleared => "cleared",
+        NotHeld => "not_held",
+    }
+}
+
 /// The symbol of an honoured removal.
 fn removing(ruby: &Ruby, removed: Removing) -> Value {
-    ruby.to_symbol(match removed {
-        Removing::Cleared => "cleared",
-        Removing::NotHeld => "not_held",
-    })
-    .as_value()
+    Removings::symbol(ruby, removed).as_value()
 }
 
 impl Wrapper {
     /// `CuckooFilter.new(buckets)`. `RangeError` outside [`BUCKETS`].
-    fn new(ruby: &Ruby, Whole(buckets): Whole<usize>) -> Result<Self, Error> {
+    fn new(ruby: &Ruby, buckets: Value) -> Result<Self, Error> {
+        let buckets: usize = integer(buckets, "buckets")?;
         let filter = match buckets {
             1024 => Filter::B1024(boxed_new()),
             4096 => Filter::B4096(boxed_new()),
@@ -95,9 +104,9 @@ impl Wrapper {
         decoded_or_refused(ruby, decoded(&bytes).map(|held| Self(RefCell::new(held))))
     }
 
-    fn decode_into(ruby: &Ruby, this: Obj<Self>, bytes: RString) -> Result<Value, Error> {
-        let bytes = bytes.to_bytes();
+    fn decode_into(ruby: &Ruby, this: Obj<Self>, bytes: Value) -> Result<Value, Error> {
         this.check_frozen()?;
+        let bytes = RString::try_convert(bytes)?.to_bytes();
         let outcome = filter!(&mut *this.0.borrow_mut(), |filter| filter
             .decode_into(&bytes));
         Ok(answer(ruby, outcome, "decoded"))
@@ -111,15 +120,16 @@ impl Wrapper {
         filter!(&*self.0.borrow(), |filter| capacity_of(&**filter))
     }
 
-    fn insert(ruby: &Ruby, this: Obj<Self>, item: RString) -> Result<Value, Error> {
-        let item = item.to_bytes();
+    fn insert(ruby: &Ruby, this: Obj<Self>, item: Value) -> Result<Value, Error> {
         this.check_frozen()?;
+        let item = RString::try_convert(item)?.to_bytes();
         let outcome = filter!(&mut *this.0.borrow_mut(), |filter| filter.insert(&item));
         Ok(answer(ruby, outcome, "inserted"))
     }
 
-    fn insert_hash(ruby: &Ruby, this: Obj<Self>, Whole(hash): Whole<u64>) -> Result<Value, Error> {
+    fn insert_hash(ruby: &Ruby, this: Obj<Self>, hash: Value) -> Result<Value, Error> {
         this.check_frozen()?;
+        let hash: u64 = integer(hash, "hash")?;
         let outcome = filter!(&mut *this.0.borrow_mut(), |filter| filter.insert_hash(hash));
         Ok(answer(ruby, outcome, "inserted"))
     }
@@ -129,19 +139,21 @@ impl Wrapper {
         filter!(&*self.0.borrow(), |filter| filter.contains(&item))
     }
 
-    fn contains_hash(&self, Whole(hash): Whole<u64>) -> bool {
-        filter!(&*self.0.borrow(), |filter| filter.contains_hash(hash))
+    fn contains_hash(&self, hash: Value) -> Result<bool, Error> {
+        let hash = integer(hash, "hash")?;
+        Ok(filter!(&*self.0.borrow(), |filter| filter.contains_hash(hash)))
     }
 
-    fn remove(ruby: &Ruby, this: Obj<Self>, item: RString) -> Result<Value, Error> {
-        let item = item.to_bytes();
+    fn remove(ruby: &Ruby, this: Obj<Self>, item: Value) -> Result<Value, Error> {
         this.check_frozen()?;
+        let item = RString::try_convert(item)?.to_bytes();
         let removed = filter!(&mut *this.0.borrow_mut(), |filter| filter.remove(&item));
         Ok(removing(ruby, removed))
     }
 
-    fn remove_hash(ruby: &Ruby, this: Obj<Self>, Whole(hash): Whole<u64>) -> Result<Value, Error> {
+    fn remove_hash(ruby: &Ruby, this: Obj<Self>, hash: Value) -> Result<Value, Error> {
         this.check_frozen()?;
+        let hash: u64 = integer(hash, "hash")?;
         let removed = filter!(&mut *this.0.borrow_mut(), |filter| filter.remove_hash(hash));
         Ok(removing(ruby, removed))
     }
@@ -170,7 +182,7 @@ impl Wrapper {
 }
 
 pub fn define(ruby: &Ruby, module: RModule) -> Result<(), Error> {
-    let class = define_class(ruby, module, "CuckooFilter")?;
+    let class = define_class(ruby, module, "CuckooFilter", &CLASS)?;
     class.const_set("BUCKETS", sizes(ruby, &BUCKETS))?;
     class.define_singleton_method("new", function!(Wrapper::new, 1))?;
     class.define_singleton_method("decode", function!(Wrapper::decode, 1))?;

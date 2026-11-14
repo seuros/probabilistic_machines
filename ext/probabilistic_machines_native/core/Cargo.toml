@@ -10,7 +10,7 @@ repository = "https://github.com/seuros/probabilistic_machines"
 keywords = ["hyperloglog", "t-digest", "count-min", "sketch", "no-std"]
 categories = ["no-std", "algorithms", "data-structures"]
 readme = "README.md"
-exclude = ["src/**/tests.rs", "tests/"]
+exclude = ["src/tests/", "src/**/tests.rs", "tests/"]
 [lib]
 name = "probabilistic_machines"
 crate-type = ["lib"]
@@ -21,6 +21,9 @@ alloc = []
 
 [dependencies]
 sliderule-machines = ">=0.2"
+
+[dev-dependencies]
+matryona-machines = { workspace = true, features = ["testing"] }
 
 [lints]
 workspace = true

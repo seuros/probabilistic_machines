@@ -3,10 +3,11 @@
 use std::cell::RefCell;
 
 use magnus::typed_data::Obj;
-use magnus::{Error, RModule, RString, Ruby, Value, function, method, prelude::*};
+use magnus::{Error, RModule, RString, Ruby, TryConvert, Value, function, method, prelude::*};
+use matryona_machines::ruby::integer;
 use probabilistic_machines::{HyperLogLog, Refusal};
 
-use crate::{Whole, answer, decoded_or_refused, define_class, sizes, unsupported};
+use crate::{Pinned, answer, decoded_or_refused, define_class, partner, sizes, unsupported};
 
 /// Register counts [`Sketch`] is monomorphised for.
 const REGISTERS: [usize; 4] = [1024, 4096, 16384, 65536];
@@ -30,6 +31,9 @@ macro_rules! sketch {
         }
     };
 }
+
+/// The class, pinned at init.
+static CLASS: Pinned = Pinned::new("probabilistic_machines");
 
 #[magnus::wrap(class = "ProbabilisticMachines::HyperLogLog", free_immediately, size)]
 struct Wrapper(RefCell<Sketch>);
@@ -70,7 +74,8 @@ fn decoded(frame: &[u8]) -> Result<Sketch, Refusal> {
 
 impl Wrapper {
     /// `HyperLogLog.new(registers)`. `RangeError` outside [`REGISTERS`].
-    fn new(ruby: &Ruby, Whole(registers): Whole<usize>) -> Result<Self, Error> {
+    fn new(ruby: &Ruby, registers: Value) -> Result<Self, Error> {
+        let registers: usize = integer(registers, "registers")?;
         let sketch = match registers {
             1024 => Sketch::M1024(boxed_new()),
             4096 => Sketch::M4096(boxed_new()),
@@ -87,9 +92,9 @@ impl Wrapper {
         decoded_or_refused(ruby, decoded(&bytes).map(|held| Self(RefCell::new(held))))
     }
 
-    fn decode_into(ruby: &Ruby, this: Obj<Self>, bytes: RString) -> Result<Value, Error> {
-        let bytes = bytes.to_bytes();
+    fn decode_into(ruby: &Ruby, this: Obj<Self>, bytes: Value) -> Result<Value, Error> {
         this.check_frozen()?;
+        let bytes = RString::try_convert(bytes)?.to_bytes();
         let outcome = sketch!(&mut *this.0.borrow_mut(), |sketch| sketch
             .decode_into(&bytes));
         Ok(answer(ruby, outcome, "decoded"))
@@ -99,15 +104,16 @@ impl Wrapper {
         sketch!(&*self.0.borrow(), |sketch| registers_of(&**sketch))
     }
 
-    fn add(this: Obj<Self>, item: RString) -> Result<(), Error> {
-        let item = item.to_bytes();
+    fn add(this: Obj<Self>, item: Value) -> Result<(), Error> {
         this.check_frozen()?;
+        let item = RString::try_convert(item)?.to_bytes();
         sketch!(&mut *this.0.borrow_mut(), |sketch| sketch.add(&item));
         Ok(())
     }
 
-    fn add_hash(this: Obj<Self>, Whole(hash): Whole<u64>) -> Result<(), Error> {
+    fn add_hash(this: Obj<Self>, hash: Value) -> Result<(), Error> {
         this.check_frozen()?;
+        let hash: u64 = integer(hash, "hash")?;
         sketch!(&mut *this.0.borrow_mut(), |sketch| sketch.add_hash(hash));
         Ok(())
     }
@@ -126,8 +132,10 @@ impl Wrapper {
 
     /// `:merged`, or `:wrong_shape` for a sketch of another register count
     /// (in Rust that merge does not compile).
-    fn merge(ruby: &Ruby, this: Obj<Self>, other: &Self) -> Result<Value, Error> {
+    fn merge(ruby: &Ruby, this: Obj<Self>, other: Value) -> Result<Value, Error> {
         this.check_frozen()?;
+        let message = "other must be a ProbabilisticMachines::HyperLogLog";
+        let other: Obj<Self> = partner(ruby, &CLASS, other, message)?;
         let source = other.0.borrow().clone();
         let merged = match (&mut *this.0.borrow_mut(), &source) {
             (Sketch::M1024(target), Sketch::M1024(source)) => {
@@ -169,7 +177,7 @@ impl Wrapper {
 }
 
 pub fn define(ruby: &Ruby, module: RModule) -> Result<(), Error> {
-    let class = define_class(ruby, module, "HyperLogLog")?;
+    let class = define_class(ruby, module, "HyperLogLog", &CLASS)?;
     class.const_set("REGISTERS", sizes(ruby, &REGISTERS))?;
     class.define_singleton_method("new", function!(Wrapper::new, 1))?;
     class.define_singleton_method("decode", function!(Wrapper::decode, 1))?;

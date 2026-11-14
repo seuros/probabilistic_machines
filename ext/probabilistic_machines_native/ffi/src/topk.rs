@@ -4,11 +4,14 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
 use magnus::typed_data::Obj;
-use magnus::{Error, RArray, RModule, RString, Ruby, Value, function, method, prelude::*};
+use magnus::{
+    Error, RArray, RModule, RString, Ruby, TryConvert, Value, function, method, prelude::*,
+};
+use matryona_machines::ruby::integer;
 use probabilistic_machines::{HeavyHitters, Hitter, Refusal, hash64};
 
 use crate::data::{hitter, hitter_class, utf8_key};
-use crate::{Whole, answer, decoded_or_refused, define_class, sizes, unsupported};
+use crate::{Pinned, answer, decoded_or_refused, define_class, partner, sizes, unsupported};
 
 /// Counter counts [`Table`] is monomorphised for.
 const COUNTERS: [usize; 3] = [16, 64, 256];
@@ -37,6 +40,9 @@ type Names = HashMap<u64, String>;
 /// tracked hash came from. A key the table evicted leaves its name behind, so
 /// `names` is pruned back to the tracked hashes once it holds more than twice
 /// the counters.
+/// The class, pinned at init.
+static CLASS: Pinned = Pinned::new("probabilistic_machines");
+
 #[magnus::wrap(class = "ProbabilisticMachines::HeavyHitters", free_immediately, size)]
 struct Wrapper {
     table: RefCell<Table>,
@@ -119,7 +125,8 @@ fn decoded(blob: &[u8]) -> Result<(Table, Names), Refusal> {
 
 impl Wrapper {
     /// `HeavyHitters.new(counters)`. `RangeError` outside [`COUNTERS`].
-    fn new(ruby: &Ruby, Whole(counters): Whole<usize>) -> Result<Self, Error> {
+    fn new(ruby: &Ruby, counters: Value) -> Result<Self, Error> {
+        let counters: usize = integer(counters, "counters")?;
         let table = match counters {
             16 => Table::K16(boxed_new()),
             64 => Table::K64(boxed_new()),
@@ -143,9 +150,9 @@ impl Wrapper {
     }
 
     /// `:decoded`, or the refusal symbol with the table and names untouched.
-    fn decode_into(ruby: &Ruby, this: Obj<Self>, blob: RString) -> Result<Value, Error> {
-        let blob = blob.to_bytes();
+    fn decode_into(ruby: &Ruby, this: Obj<Self>, blob: Value) -> Result<Value, Error> {
         this.check_frozen()?;
+        let blob = RString::try_convert(blob)?.to_bytes();
         let read = match &*this.table.borrow() {
             Table::K16(_) => decode_table(&blob).map(|(table, names)| (Table::K16(table), names)),
             Table::K64(_) => decode_table(&blob).map(|(table, names)| (Table::K64(table), names)),
@@ -163,18 +170,20 @@ impl Wrapper {
     }
 
     fn add(ruby: &Ruby, this: Obj<Self>, key: Value) -> Result<Value, Error> {
-        Self::add_count(ruby, this, key, Whole(1))
+        this.check_frozen()?;
+        let key = utf8_key(ruby, key)?;
+        Ok(Self::counted(ruby, this, key, 1))
+    }
+
+    fn add_count(ruby: &Ruby, this: Obj<Self>, key: Value, count: Value) -> Result<Value, Error> {
+        this.check_frozen()?;
+        let key = utf8_key(ruby, key)?;
+        let count = integer(count, "count")?;
+        Ok(Self::counted(ruby, this, key, count))
     }
 
     /// Records the name only once the core has honoured the count.
-    fn add_count(
-        ruby: &Ruby,
-        this: Obj<Self>,
-        key: Value,
-        Whole(count): Whole<u64>,
-    ) -> Result<Value, Error> {
-        this.check_frozen()?;
-        let key = utf8_key(ruby, key)?;
+    fn counted(ruby: &Ruby, this: Obj<Self>, key: String, count: u64) -> Value {
         let hash = hash64(key.as_bytes());
         let outcome = table!(&mut *this.table.borrow_mut(), |table| table
             .add_count(hash, count));
@@ -182,7 +191,7 @@ impl Wrapper {
             this.names.borrow_mut().insert(hash, key);
             this.prune();
         }
-        Ok(answer(ruby, outcome, "added"))
+        answer(ruby, outcome, "added")
     }
 
     fn count(ruby: &Ruby, this: &Self, key: Value) -> Result<u64, Error> {
@@ -225,8 +234,10 @@ impl Wrapper {
 
     /// `:merged`, `:overflow`, or `:wrong_shape` for a table of another
     /// counter count (in Rust that merge does not compile).
-    fn merge(ruby: &Ruby, this: Obj<Self>, other: &Self) -> Result<Value, Error> {
+    fn merge(ruby: &Ruby, this: Obj<Self>, other: Value) -> Result<Value, Error> {
         this.check_frozen()?;
+        let message = "other must be a ProbabilisticMachines::HeavyHitters";
+        let other: Obj<Self> = partner(ruby, &CLASS, other, message)?;
         let source = other.table.borrow().clone();
         let names = other.names.borrow().clone();
         let merged = match (&mut *this.table.borrow_mut(), &source) {
@@ -314,7 +325,7 @@ impl Wrapper {
 }
 
 pub fn define(ruby: &Ruby, module: RModule) -> Result<(), Error> {
-    let class = define_class(ruby, module, "HeavyHitters")?;
+    let class = define_class(ruby, module, "HeavyHitters", &CLASS)?;
     class.const_set("COUNTERS", sizes(ruby, &COUNTERS))?;
     class.define_singleton_method("new", function!(Wrapper::new, 1))?;
     class.define_singleton_method("decode", function!(Wrapper::decode, 1))?;

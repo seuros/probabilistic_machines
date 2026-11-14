@@ -5,26 +5,25 @@
 //! private validation hooks below, which hold a value to the core's own
 //! constructor: `Hitter::new` and `Centroid::new`.
 
-use std::sync::OnceLock;
-
-use magnus::value::Opaque;
 use magnus::{Error, RArray, RClass, RModule, RString, Ruby, Value, function, prelude::*};
+use matryona_machines::ruby::{Class, Registry, integer};
 use probabilistic_machines::{Centroid, Hitter};
 
-use crate::Whole;
+/// `Hitter` and `Centroid`, resolved once at init and pinned:
+/// `lib/probabilistic_machines.rb` defines both before the extension loads.
+struct Classes {
+    hitter: Class,
+    centroid: Class,
+}
 
-/// `Hitter` and `Centroid`, resolved once at init: `lib/probabilistic_machines.rb`
-/// defines both before the extension loads.
-static CLASSES: OnceLock<[Opaque<RClass>; 2]> = OnceLock::new();
+static CLASSES: Registry<Classes> = Registry::new("probabilistic_machines");
 
 pub fn define(ruby: &Ruby, module: RModule) -> Result<(), Error> {
-    let hitter: RClass = module.const_get("Hitter")?;
-    let centroid: RClass = module.const_get("Centroid")?;
-    // Held in a static, so pinned: `GC.compact` must not move them.
-    ruby.gc_register_mark_object(hitter);
-    ruby.gc_register_mark_object(centroid);
-    // A second load keeps the first classes: they are the same constants.
-    let _ = CLASSES.get_or_init(|| [hitter.into(), centroid.into()]);
+    let classes = Classes {
+        hitter: Class::resolve(ruby, module, "Hitter")?,
+        centroid: Class::resolve(ruby, module, "Centroid")?,
+    };
+    CLASSES.set(ruby, classes)?;
     module.define_singleton_method("__hitter", function!(checked_hitter, 3))?;
     module.define_singleton_method("__centroid", function!(checked_centroid, 2))?;
     Ok(())
@@ -57,9 +56,11 @@ pub fn utf8_key(ruby: &Ruby, key: Value) -> Result<String, Error> {
 fn checked_hitter(
     ruby: &Ruby,
     key: Value,
-    Whole(count): Whole<u64>,
-    Whole(overestimate): Whole<u64>,
+    count: Value,
+    overestimate: Value,
 ) -> Result<RArray, Error> {
+    let count: u64 = integer(count, "count")?;
+    let overestimate: u64 = integer(overestimate, "overestimate")?;
     let key = utf8_key(ruby, key)?;
     if Hitter::new((), count, overestimate).is_none() {
         return Err(Error::new(
@@ -92,27 +93,14 @@ fn checked_centroid(ruby: &Ruby, mean: f64, weight: f64) -> Result<(f64, f64), E
     Ok((centroid.mean(), centroid.weight()))
 }
 
-fn class(ruby: &Ruby, index: usize) -> Result<RClass, Error> {
-    CLASSES
-        .get()
-        .and_then(|classes| classes.get(index))
-        .map(|class| ruby.get_inner(*class))
-        .ok_or_else(|| {
-            Error::new(
-                ruby.exception_load_error(),
-                "the probabilistic_machines extension is not initialised",
-            )
-        })
-}
-
 /// The `Hitter` class resolved at init.
 pub fn hitter_class(ruby: &Ruby) -> Result<RClass, Error> {
-    class(ruby, 0)
+    Ok(CLASSES.get(ruby)?.hitter.get(ruby))
 }
 
 /// The `Centroid` class resolved at init.
 pub fn centroid_class(ruby: &Ruby) -> Result<RClass, Error> {
-    class(ruby, 1)
+    Ok(CLASSES.get(ruby)?.centroid.get(ruby))
 }
 
 /// A `Hitter` for a key the table tracks.

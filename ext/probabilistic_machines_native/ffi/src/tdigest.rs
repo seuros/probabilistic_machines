@@ -3,11 +3,17 @@
 use std::cell::RefCell;
 
 use magnus::typed_data::Obj;
-use magnus::{Error, RArray, RModule, RString, Ruby, Value, function, method, prelude::*};
+use magnus::{
+    Error, RArray, RModule, RString, Ruby, TryConvert, Value, function, method, prelude::*,
+};
+use matryona_machines::ruby::integer;
 use probabilistic_machines::{MIN_COMPRESSION, TDigest};
 
 use crate::data::{centroid, centroid_class};
-use crate::{Whole, answer, decoded_or_refused, define_class};
+use crate::{Pinned, answer, decoded_or_refused, define_class, partner};
+
+/// The class, pinned at init.
+static CLASS: Pinned = Pinned::new("probabilistic_machines");
 
 #[magnus::wrap(class = "ProbabilisticMachines::TDigest", free_immediately, size)]
 struct Wrapper(RefCell<TDigest>);
@@ -15,7 +21,8 @@ struct Wrapper(RefCell<TDigest>);
 impl Wrapper {
     /// `TDigest.new(compression)`. `RangeError` where `TDigest::new` answers
     /// `None`, below [`MIN_COMPRESSION`], or past 65535.
-    fn new(ruby: &Ruby, Whole(compression): Whole<u16>) -> Result<Self, Error> {
+    fn new(ruby: &Ruby, compression: Value) -> Result<Self, Error> {
+        let compression: u16 = integer(compression, "compression")?;
         TDigest::new(compression)
             .map(|digest| Self(RefCell::new(digest)))
             .ok_or_else(|| {
@@ -39,14 +46,22 @@ impl Wrapper {
         self.0.borrow().compression()
     }
 
-    fn add(ruby: &Ruby, this: Obj<Self>, value: f64) -> Result<Value, Error> {
+    fn add(ruby: &Ruby, this: Obj<Self>, value: Value) -> Result<Value, Error> {
         this.check_frozen()?;
+        let value = f64::try_convert(value)?;
         let outcome = this.0.borrow_mut().add(value);
         Ok(answer(ruby, outcome, "added"))
     }
 
-    fn add_weighted(ruby: &Ruby, this: Obj<Self>, value: f64, weight: f64) -> Result<Value, Error> {
+    fn add_weighted(
+        ruby: &Ruby,
+        this: Obj<Self>,
+        value: Value,
+        weight: Value,
+    ) -> Result<Value, Error> {
         this.check_frozen()?;
+        let value = f64::try_convert(value)?;
+        let weight = f64::try_convert(weight)?;
         let outcome = this.0.borrow_mut().add_weighted(value, weight);
         Ok(answer(ruby, outcome, "added"))
     }
@@ -97,8 +112,10 @@ impl Wrapper {
 
     /// `:merged`, `:wrong_shape` for a digest of another compression, or
     /// `:overflow`.
-    fn merge(ruby: &Ruby, this: Obj<Self>, other: &Self) -> Result<Value, Error> {
+    fn merge(ruby: &Ruby, this: Obj<Self>, other: Value) -> Result<Value, Error> {
         this.check_frozen()?;
+        let message = "other must be a ProbabilisticMachines::TDigest";
+        let other: Obj<Self> = partner(ruby, &CLASS, other, message)?;
         let source = other.0.borrow().clone();
         let merged = this.0.borrow_mut().merge(&source);
         Ok(answer(ruby, merged, "merged"))
@@ -120,7 +137,7 @@ impl Wrapper {
 }
 
 pub fn define(ruby: &Ruby, module: RModule) -> Result<(), Error> {
-    let class = define_class(ruby, module, "TDigest")?;
+    let class = define_class(ruby, module, "TDigest", &CLASS)?;
     class.const_set("MIN_COMPRESSION", MIN_COMPRESSION)?;
     class.define_singleton_method("new", function!(Wrapper::new, 1))?;
     class.define_singleton_method("decode", function!(Wrapper::decode, 1))?;

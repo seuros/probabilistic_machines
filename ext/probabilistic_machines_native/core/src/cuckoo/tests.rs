@@ -1,6 +1,7 @@
 use super::{CuckooFilter, Removing};
 use crate::Refusal;
 use crate::hash::mix64;
+use matryona_machines::testing::{refuses, unchanged};
 
 fn key(index: u32) -> [u8; 8] {
     mix64(u64::from(index)).to_le_bytes()
@@ -39,11 +40,15 @@ fn removing_what_is_not_held_is_honoured_and_changes_nothing() {
     let mut filter = CuckooFilter::<256>::new();
     assert_eq!(filter.insert(b"serial-1"), Ok(()));
     assert_eq!(filter.remove(b"serial-1"), Removing::Cleared);
-    let before = filter.clone();
 
-    assert_eq!(filter.remove(b"serial-1"), Removing::NotHeld);
-    assert_eq!(filter.remove_hash(42), Removing::NotHeld);
-    assert_eq!(filter, before);
+    assert_eq!(
+        unchanged(&mut filter, |f| f.remove(b"serial-1")),
+        Removing::NotHeld
+    );
+    assert_eq!(
+        unchanged(&mut filter, |f| f.remove_hash(42)),
+        Removing::NotHeld
+    );
 }
 
 // The documented caveat: a never-inserted item that shares a fingerprint and a
@@ -96,9 +101,7 @@ fn a_failed_insert_leaves_every_other_item_in_place() {
         CuckooFilter::<64>::CAPACITY
     );
 
-    let before = filter.clone();
-    assert_eq!(filter.insert(&key(next)), Err(Refusal::Full));
-    assert_eq!(filter, before);
+    refuses(&mut filter, Refusal::Full, |f| f.insert(&key(next)));
     assert_eq!(filter.len(), stored);
     for index in 0..next {
         assert!(filter.contains(&key(index)), "{index}");

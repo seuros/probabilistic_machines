@@ -2,6 +2,7 @@ use core::assert_matches;
 
 use super::{CENTROID_LEN, Centroid, HEADER_LEN, MIN_COMPRESSION, TDigest};
 use crate::Refusal;
+use matryona_machines::testing::refuses;
 
 fn built(compression: u16) -> TDigest {
     TDigest::new(compression).unwrap_or_else(|| panic!("compression {compression}"))
@@ -367,7 +368,6 @@ fn a_compression_below_the_minimum_builds_nothing() {
 #[test]
 fn an_add_outside_the_precondition_is_refused_and_changes_nothing() {
     let mut digest = uniform(50, 100);
-    let before = digest.clone();
     for (value, weight, refusal) in [
         (f64::NAN, 1.0, Refusal::NotFinite),
         (f64::INFINITY, 1.0, Refusal::NotFinite),
@@ -380,35 +380,27 @@ fn an_add_outside_the_precondition_is_refused_and_changes_nothing() {
         let mut huge = digest.clone();
         if refusal == Refusal::Overflow {
             assert_eq!(huge.add_weighted(2.0, f64::MAX), Ok(()));
-            let full = huge.clone();
-            assert_eq!(huge.add_weighted(value, weight), Err(refusal));
-            assert_eq!(huge, full);
+            refuses(&mut huge, refusal, |d| d.add_weighted(value, weight));
         } else {
-            assert_eq!(
-                digest.add_weighted(value, weight),
-                Err(refusal),
-                "{value} {weight}"
-            );
-            assert_eq!(digest, before);
+            refuses(&mut digest, refusal, |d| d.add_weighted(value, weight));
         }
     }
-    assert_eq!(digest.add(f64::NEG_INFINITY), Err(Refusal::NotFinite));
-    assert_eq!(digest, before);
+    refuses(&mut digest, Refusal::NotFinite, |d| {
+        d.add(f64::NEG_INFINITY)
+    });
 }
 
 #[test]
 fn a_merge_of_another_shape_or_an_infinite_total_is_refused_and_changes_nothing() {
     let mut digest = uniform(50, 100);
-    let before = digest.clone();
-    assert_eq!(digest.merge(&uniform(50, 200)), Err(Refusal::WrongShape));
-    assert_eq!(digest, before);
+    refuses(&mut digest, Refusal::WrongShape, |d| {
+        d.merge(&uniform(50, 200))
+    });
 
     let mut heavy = built(100);
     assert_eq!(heavy.add_weighted(1.0, f64::MAX), Ok(()));
     let mut target = heavy.clone();
-    let full = target.clone();
-    assert_eq!(target.merge(&heavy), Err(Refusal::Overflow));
-    assert_eq!(target, full);
+    refuses(&mut target, Refusal::Overflow, |t| t.merge(&heavy));
 }
 
 #[test]

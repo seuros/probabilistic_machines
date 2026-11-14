@@ -51,6 +51,7 @@ impl<const W: usize, const D: usize> CountMinSketch<W, D> {
     /// Length of the [`encode`](Self::encode) frame.
     pub const ENCODED_LEN: usize = HEADER_LEN + W * D * COUNTER_LEN;
 
+    /// An empty sketch: every counter zero.
     #[must_use]
     pub const fn new() -> Self {
         Self { rows: [[0; W]; D] }

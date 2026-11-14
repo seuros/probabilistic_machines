@@ -118,6 +118,7 @@ impl TDigest {
         }
     }
 
+    /// The compression the digest was built with.
     #[must_use]
     pub const fn compression(&self) -> u16 {
         self.compression
@@ -147,11 +148,13 @@ impl TDigest {
         &self.centroids
     }
 
+    /// The number of centroids held.
     #[must_use]
     pub const fn len(&self) -> usize {
         self.centroids.len()
     }
 
+    /// Whether the digest holds no centroid.
     #[must_use]
     pub const fn is_empty(&self) -> bool {
         self.centroids.is_empty()

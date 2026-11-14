@@ -65,6 +65,7 @@ impl<const M: usize> HyperLogLog<M> {
     /// Length of the [`encode`](Self::encode) frame.
     pub const ENCODED_LEN: usize = M + 2;
 
+    /// An empty sketch: every register zero.
     #[must_use]
     pub const fn new() -> Self {
         Self { registers: [0; M] }
@@ -84,6 +85,7 @@ impl<const M: usize> HyperLogLog<M> {
         }
     }
 
+    /// Counts `item`, hashed with [`hash64`].
     pub fn add(&mut self, item: &[u8]) {
         self.add_hash(hash64(item));
     }
@@ -98,6 +100,7 @@ impl<const M: usize> HyperLogLog<M> {
         }
     }
 
+    /// Whether nothing was ever added: every register zero.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.registers.iter().all(|&register| register == 0)

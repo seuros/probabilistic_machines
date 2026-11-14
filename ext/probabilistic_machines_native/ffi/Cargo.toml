@@ -16,10 +16,11 @@ workspace = true
 
 [dependencies]
 probabilistic-machines = { workspace = true, features = ["alloc"] }
-magnus = { version = ">= 0.9.3", default-features = false, features = ["bytes", "io"] }
+magnus = { version = "0.9.3", default-features = false, features = ["bytes", "io"] }
+matryona-machines = { workspace = true, features = ["ruby"] }
 # Nothing here calls rb-sys directly: this is the compiled fallback that
 # implements the stable API for a Ruby rb-sys ships no pre-generated bindings
 # for, such as a preview. magnus asks for "stable-api" without it, and its
 # default-features = false drops the default that would have supplied it, so
 # dropping this line breaks the build on every Ruby newer than rb-sys.
-rb-sys = { version = ">= 0.9.130", default-features = false, features = ["stable-api-compiled-fallback"] }
+rb-sys = { version = "0.9.130", default-features = false, features = ["stable-api-compiled-fallback"] }

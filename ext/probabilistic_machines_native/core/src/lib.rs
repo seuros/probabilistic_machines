@@ -1,3 +1,5 @@
+//! Sketches that answer questions about a stream in less memory than the
+//! stream: `HyperLogLog`, count-min, cuckoo filter, heavy hitters and t-digest.
 #![no_std]
 
 #[cfg(feature = "alloc")]
