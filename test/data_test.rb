@@ -29,6 +29,16 @@ module ProbabilisticMachines
       end
       assert_raises(TypeError) { Centroid.new('1', 1) }
       assert_raises(TypeError) { Centroid.new(1, nil) }
+      # Read natively, as the core's rule: exactly a Float or an Integer, finite.
+      to_f = Object.new.tap { |object| def object.to_f = 1.0 }
+      [1r, to_f].each do |bad|
+        assert_equal 'mean must be a Float or Integer', assert_raises(TypeError) { Centroid.new(bad, 1) }.message
+        assert_equal 'weight must be a Float or Integer', assert_raises(TypeError) { Centroid.new(1, bad) }.message
+      end
+      [Float::NAN, -Float::INFINITY, 2**1024].each do |bad|
+        assert_equal 'mean must be finite', assert_raises(RangeError) { Centroid.new(bad, 1) }.message
+        assert_equal 'weight must be finite', assert_raises(RangeError) { Centroid.new(1, bad) }.message
+      end
     end
 
     # A subclass overriding `initialize` without `super`, `allocate`, or a

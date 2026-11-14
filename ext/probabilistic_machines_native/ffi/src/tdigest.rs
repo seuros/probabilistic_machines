@@ -3,10 +3,8 @@
 use std::cell::RefCell;
 
 use magnus::typed_data::Obj;
-use magnus::{
-    Error, RArray, RModule, RString, Ruby, TryConvert, Value, function, method, prelude::*,
-};
-use matryona_machines::ruby::integer;
+use magnus::{Error, RArray, RModule, RString, Ruby, Value, function, method, prelude::*};
+use matryona_machines::ruby::{bytes, integer, real};
 use probabilistic_machines::{MIN_COMPRESSION, TDigest};
 
 use crate::data::{centroid, centroid_class};
@@ -34,12 +32,12 @@ impl Wrapper {
     }
 
     /// `TDigest.decode(bytes)`: a digest, or the refusal symbol.
-    fn decode(ruby: &Ruby, bytes: RString) -> Value {
-        let bytes = bytes.to_bytes();
-        decoded_or_refused(
+    fn decode(ruby: &Ruby, bytes: Value) -> Result<Value, Error> {
+        let bytes = self::bytes(bytes, "bytes")?;
+        Ok(decoded_or_refused(
             ruby,
             TDigest::decode(&bytes).map(|held| Self(RefCell::new(held))),
-        )
+        ))
     }
 
     fn compression(&self) -> u16 {
@@ -48,7 +46,7 @@ impl Wrapper {
 
     fn add(ruby: &Ruby, this: Obj<Self>, value: Value) -> Result<Value, Error> {
         this.check_frozen()?;
-        let value = f64::try_convert(value)?;
+        let value = real(value, "value")?;
         let outcome = this.0.borrow_mut().add(value);
         Ok(answer(ruby, outcome, "added"))
     }
@@ -60,18 +58,20 @@ impl Wrapper {
         weight: Value,
     ) -> Result<Value, Error> {
         this.check_frozen()?;
-        let value = f64::try_convert(value)?;
-        let weight = f64::try_convert(weight)?;
+        let value = real(value, "value")?;
+        let weight = real(weight, "weight")?;
         let outcome = this.0.borrow_mut().add_weighted(value, weight);
         Ok(answer(ruby, outcome, "added"))
     }
 
-    fn quantile(&self, q: f64) -> f64 {
-        self.0.borrow().quantile(q)
+    fn quantile(&self, q: Value) -> Result<f64, Error> {
+        let q = real(q, "q")?;
+        Ok(self.0.borrow().quantile(q))
     }
 
-    fn cdf(&self, value: f64) -> f64 {
-        self.0.borrow().cdf(value)
+    fn cdf(&self, value: Value) -> Result<f64, Error> {
+        let value = real(value, "value")?;
+        Ok(self.0.borrow().cdf(value))
     }
 
     fn count(&self) -> f64 {
@@ -114,8 +114,7 @@ impl Wrapper {
     /// `:overflow`.
     fn merge(ruby: &Ruby, this: Obj<Self>, other: Value) -> Result<Value, Error> {
         this.check_frozen()?;
-        let message = "other must be a ProbabilisticMachines::TDigest";
-        let other: Obj<Self> = partner(ruby, &CLASS, other, message)?;
+        let other: Obj<Self> = partner(ruby, &CLASS, other)?;
         let source = other.0.borrow().clone();
         let merged = this.0.borrow_mut().merge(&source);
         Ok(answer(ruby, merged, "merged"))

@@ -115,6 +115,33 @@ module ProbabilisticMachines
       end
     end
 
+    # Values, weights, quantiles and cdf points are exactly a Float or an
+    # Integer, read natively: a Rational (once taken as a Float) or an
+    # object answering to_f is TypeError, and no to_f runs. NaN and the
+    # infinities still reach the core, which refuses them as :not_finite.
+    def test_reals_are_floats_or_integers_read_natively
+      digest = TDigest.new(100)
+      to_f = Object.new.tap { |object| def object.to_f = 1.0 }
+      [1r, to_f, Complex(1, 0), nil].each do |bad|
+        assert_equal 'value must be a Float or Integer', assert_raises(TypeError) { digest.add(bad) }.message
+        assert_equal 'value must be a Float or Integer', assert_raises(TypeError) { digest.add_weighted(bad, 1) }.message
+        assert_equal 'weight must be a Float or Integer', assert_raises(TypeError) { digest.add_weighted(1, bad) }.message
+        assert_equal 'q must be a Float or Integer', assert_raises(TypeError) { digest.quantile(bad) }.message
+        assert_equal 'value must be a Float or Integer', assert_raises(TypeError) { digest.cdf(bad) }.message
+      end
+      assert digest.empty?
+      assert_equal :not_finite, digest.add(Float::NAN)
+      assert_equal :not_finite, digest.add(2**1024)
+      Integer.alias_method(:__real_to_f, :to_f)
+      Integer.define_method(:to_f) { raise 'Integer#to_f called' }
+      assert_equal :added, digest.add(3)
+      assert_equal :added, digest.add_weighted(5, 1)
+      assert_equal [3.0, 0.0], [digest.quantile(0), digest.cdf(1)]
+    ensure
+      Integer.alias_method(:to_f, :__real_to_f)
+      Integer.remove_method(:__real_to_f)
+    end
+
     def test_merge_folds_both_streams
       left = TDigest.new(100)
       right = TDigest.new(100)

@@ -154,20 +154,46 @@ module ProbabilisticMachines
       assert_equal [Hitter.new('theirs', 3, 0)], table.ranked
     end
 
-    # A key whose bytes are not UTF-8 is a value out of range, not an
-    # encoding problem: RangeError, from `add`, `add_count`, `count` and
-    # `Hitter.new` alike. Its encoding tag does not matter, its bytes do.
+    # A key that is not UTF-8 text is a value out of range: RangeError, from
+    # `add`, `add_count`, `count` and `Hitter.new` alike. A UTF-8 String with
+    # valid bytes is text, and so are ASCII bytes in any ASCII-compatible
+    # encoding; non-ASCII bytes tagged otherwise are never transcoded, even
+    # when they happen to be valid UTF-8.
     def test_a_key_that_is_not_utf_8_is_rejected
       table = HeavyHitters.new(16)
-
-      assert_raises(RangeError) { table.add("\xff\xfe".b) }
-      assert_raises(RangeError) { table.add_count("\xff".b, 2) }
-      assert_raises(RangeError) { table.count("\xff".b) }
-      assert_raises(RangeError) { Hitter.new("\xff".b, 2, 1) }
-      assert_raises(TypeError) { table.add(:key) }
+      ["\xff\xfe".b, "caf\xC3\xA9".b, "caf\xE9".dup.force_encoding('ISO-8859-1'), 'ab'.encode('UTF-16LE'),
+       "\xff".dup.force_encoding('UTF-8')].each do |bad|
+        [-> { table.add(bad) }, -> { table.add_count(bad, 2) }, -> { table.count(bad) },
+         -> { Hitter.new(bad, 2, 1) }].each do |call|
+          assert_equal 'key must be valid UTF-8', assert_raises(RangeError, &call).message
+        end
+      end
       assert_equal 0, table.observed
       assert_equal :added, table.add('abc'.b)
-      assert_equal 1, table.count('abc')
+      assert_equal :added, table.add('café')
+      assert_equal [1, 1], [table.count('abc'), table.count('café')]
+    end
+
+    # A key is exactly a String: a Symbol, a String subclass instance and an
+    # object answering to_str are TypeError, and the bytes are read natively,
+    # so a redefined #bytes or #to_s on the key changes nothing.
+    def test_a_key_is_exactly_a_string
+      table = HeavyHitters.new(16)
+      to_str = Object.new.tap { |object| def object.to_str = 'k' }
+      [:k, Class.new(String).new('k'), to_str, nil].each do |bad|
+        [-> { table.add(bad) }, -> { table.add_count(bad, 2) }, -> { table.count(bad) },
+         -> { Hitter.new(bad, 2, 1) }].each do |call|
+          assert_equal 'key must be a String', assert_raises(TypeError, &call).message
+        end
+      end
+      assert_equal 0, table.observed
+      liar = +'k'
+      def liar.bytes = 'other'.bytes
+      def liar.to_s = 'other'
+      def liar.to_str = 'other'
+      assert_equal :added, table.add(liar)
+      assert_equal [1, 0], [table.count('k'), table.count('other')]
+      assert_equal 'k', Hitter.new(liar, 2, 1).key
     end
   end
 end

@@ -172,9 +172,12 @@ count lies between `count - overestimate` and `count`.
 Keys are UTF-8 strings here. Space-Saving takes any `Clone + Eq` key in Rust;
 the extension counts 64-bit key hashes, so the table stays one fixed array, and
 keeps the string each tracked hash came from, to hand back in each `Hitter`. A
-key that is not a String is a `TypeError`, one whose bytes are not UTF-8 a
-`RangeError`, and the key a `Hitter` holds is a frozen copy. The other four classes take any
-byte string. A zero count is `:zero_count`: it observes nothing, yet on a full
+key that is not exactly a String (a subclass instance or a `to_str` object
+included) is a `TypeError`, one that is not UTF-8 text a `RangeError` (a valid
+UTF-8 String, or ASCII bytes in any ASCII-compatible encoding; a binary String
+holding UTF-8 bytes is not transcoded), and the key a `Hitter` holds is a
+frozen copy. The other four classes take exactly a String of any bytes in any
+encoding, read natively (no `#bytes` or `#to_str` runs). A zero count is `:zero_count`: it observes nothing, yet on a full
 table it would evict the weakest key.
 
 ---

@@ -14,7 +14,7 @@ mod tdigest;
 mod topk;
 
 use magnus::{Error, RArray, RClass, RModule, Ruby, TypedData, Value, prelude::*, typed_data::Obj};
-use matryona_machines::ruby::{Class, Registry, Symbols, exact_typed, symbol};
+use matryona_machines::ruby::{Class, Registry, Symbols, exact_typed_with, symbol};
 use probabilistic_machines::Refusal;
 
 matryona_machines::symbols! {
@@ -42,14 +42,17 @@ pub(crate) fn refusal(ruby: &Ruby, refused: Refusal) -> Value {
 pub(crate) type Pinned = Registry<Class>;
 
 /// The other operand of a merge: a `T` that is an instance of exactly the
-/// class pinned in `held`, never a subclass instance. `TypeError` otherwise.
+/// class pinned in `held`, never a subclass instance. `TypeError` otherwise,
+/// naming that class and the one received.
 pub(crate) fn partner<T: TypedData>(
     ruby: &Ruby,
     held: &Pinned,
     other: Value,
-    message: &'static str,
 ) -> Result<Obj<T>, Error> {
-    exact_typed(ruby, other, held.get(ruby)?.get(ruby), message)
+    let class = held.get(ruby)?.get(ruby);
+    exact_typed_with(ruby, other, class, || {
+        format!("other must be a {class}, not {}", other.class())
+    })
 }
 
 /// The object a `decode` built, or the refusal symbol when its frame was

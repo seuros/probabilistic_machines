@@ -79,9 +79,47 @@ module ProbabilisticMachines
       partners.each do |sketch, partner|
         assert_equal :merged, sketch.merge(partner)
         error = assert_raises(TypeError) { sketch.merge(CuckooFilter.new(1024)) }
-        assert_equal "other must be a #{sketch.class}", error.message
-        assert_raises(TypeError) { sketch.merge(:bad) }
+        assert_equal "other must be a #{sketch.class}, not ProbabilisticMachines::CuckooFilter", error.message
+        error = assert_raises(TypeError) { sketch.merge(:bad) }
+        assert_equal "other must be a #{sketch.class}, not Symbol", error.message
       end
+    end
+
+    # Frames and items are exactly a String, their bytes copied natively: a
+    # String subclass instance and an object answering to_str are TypeError,
+    # and a redefined #bytes, #to_s or #to_str on a String changes nothing.
+    def test_frames_and_items_are_exactly_a_string
+      to_str = Object.new.tap { |object| def object.to_str = 'a' }
+      bad = [Class.new(String).new('a'), to_str, :a, nil]
+      frames = { HyperLogLog => HyperLogLog.new(1024), CountMinSketch => CountMinSketch.new(1024, 4),
+                 CuckooFilter => CuckooFilter.new(1024), HeavyHitters => HeavyHitters.new(16), TDigest => TDigest.new(100) }
+      frames.each do |klass, sketch|
+        bad.each do |value|
+          assert_equal 'bytes must be a String', assert_raises(TypeError) { klass.decode(value) }.message
+          next unless sketch.respond_to?(:decode_into)
+
+          assert_equal 'bytes must be a String', assert_raises(TypeError) { sketch.decode_into(value) }.message
+        end
+      end
+      hll = HyperLogLog.new(1024)
+      cms = CountMinSketch.new(1024, 4)
+      filter = CuckooFilter.new(1024)
+      items = [-> { hll.add(it) }, -> { cms.add(it) }, -> { cms.add_count(it, 2) }, -> { cms.estimate(it) },
+               -> { filter.insert(it) }, -> { filter.contains?(it) }, -> { filter.remove(it) }]
+      bad.each do |value|
+        items.each { |call| assert_equal 'item must be a String', assert_raises(TypeError) { call.call(value) }.message }
+      end
+      assert_equal [true, 0, true], [hll.empty?, cms.total, filter.empty?]
+      liar = +'a'
+      def liar.bytes = 'b'.bytes
+      def liar.to_s = 'b'
+      def liar.to_str = 'b'
+      assert_equal [:added, :inserted], [cms.add(liar), filter.insert(liar)]
+      assert_equal [1, 0], [cms.estimate('a'), cms.estimate('b')]
+      assert filter.contains?('a')
+      frame = +cms.encoded
+      def frame.bytes = []
+      assert_instance_of CountMinSketch, CountMinSketch.decode(frame)
     end
 
     # The classes are resolved at init and pinned, so a compaction moves none

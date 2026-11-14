@@ -3,8 +3,8 @@
 use std::cell::RefCell;
 
 use magnus::typed_data::Obj;
-use magnus::{Error, RModule, RString, Ruby, TryConvert, Value, function, method, prelude::*};
-use matryona_machines::ruby::{Symbols, integer};
+use magnus::{Error, RModule, RString, Ruby, Value, function, method, prelude::*};
+use matryona_machines::ruby::{Symbols, bytes, integer};
 use probabilistic_machines::{CuckooFilter, Refusal, Removing};
 
 use crate::{Pinned, answer, decoded_or_refused, define_class, sizes, unsupported};
@@ -99,14 +99,17 @@ impl Wrapper {
     }
 
     /// `CuckooFilter.decode(bytes)`: a filter, or the refusal symbol.
-    fn decode(ruby: &Ruby, bytes: RString) -> Value {
-        let bytes = bytes.to_bytes();
-        decoded_or_refused(ruby, decoded(&bytes).map(|held| Self(RefCell::new(held))))
+    fn decode(ruby: &Ruby, bytes: Value) -> Result<Value, Error> {
+        let bytes = self::bytes(bytes, "bytes")?;
+        Ok(decoded_or_refused(
+            ruby,
+            decoded(&bytes).map(|held| Self(RefCell::new(held))),
+        ))
     }
 
     fn decode_into(ruby: &Ruby, this: Obj<Self>, bytes: Value) -> Result<Value, Error> {
         this.check_frozen()?;
-        let bytes = RString::try_convert(bytes)?.to_bytes();
+        let bytes = self::bytes(bytes, "bytes")?;
         let outcome = filter!(&mut *this.0.borrow_mut(), |filter| filter
             .decode_into(&bytes));
         Ok(answer(ruby, outcome, "decoded"))
@@ -122,7 +125,7 @@ impl Wrapper {
 
     fn insert(ruby: &Ruby, this: Obj<Self>, item: Value) -> Result<Value, Error> {
         this.check_frozen()?;
-        let item = RString::try_convert(item)?.to_bytes();
+        let item = bytes(item, "item")?;
         let outcome = filter!(&mut *this.0.borrow_mut(), |filter| filter.insert(&item));
         Ok(answer(ruby, outcome, "inserted"))
     }
@@ -134,9 +137,9 @@ impl Wrapper {
         Ok(answer(ruby, outcome, "inserted"))
     }
 
-    fn contains(&self, item: RString) -> bool {
-        let item = item.to_bytes();
-        filter!(&*self.0.borrow(), |filter| filter.contains(&item))
+    fn contains(&self, item: Value) -> Result<bool, Error> {
+        let item = bytes(item, "item")?;
+        Ok(filter!(&*self.0.borrow(), |filter| filter.contains(&item)))
     }
 
     fn contains_hash(&self, hash: Value) -> Result<bool, Error> {
@@ -146,7 +149,7 @@ impl Wrapper {
 
     fn remove(ruby: &Ruby, this: Obj<Self>, item: Value) -> Result<Value, Error> {
         this.check_frozen()?;
-        let item = RString::try_convert(item)?.to_bytes();
+        let item = bytes(item, "item")?;
         let removed = filter!(&mut *this.0.borrow_mut(), |filter| filter.remove(&item));
         Ok(removing(ruby, removed))
     }

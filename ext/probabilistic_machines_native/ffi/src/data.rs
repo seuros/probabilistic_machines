@@ -5,8 +5,8 @@
 //! private validation hooks below, which hold a value to the core's own
 //! constructor: `Hitter::new` and `Centroid::new`.
 
-use magnus::{Error, RArray, RClass, RModule, RString, Ruby, Value, function, prelude::*};
-use matryona_machines::ruby::{Class, Registry, integer};
+use magnus::{Error, RArray, RClass, RModule, Ruby, Value, function, prelude::*};
+use matryona_machines::ruby::{Class, Registry, finite, integer, utf8};
 use probabilistic_machines::{Centroid, Hitter};
 
 /// `Hitter` and `Centroid`, resolved once at init and pinned:
@@ -29,28 +29,10 @@ pub fn define(ruby: &Ruby, module: RModule) -> Result<(), Error> {
     Ok(())
 }
 
-/// A key as the table hashes it: the bytes of a String, which must be UTF-8.
-/// `TypeError` for anything but a String, `RangeError` for bytes that are not
-/// UTF-8 (whatever encoding the String is tagged with).
-pub fn utf8_key(ruby: &Ruby, key: Value) -> Result<String, Error> {
-    let Some(string) = RString::from_value(key) else {
-        return Err(Error::new(
-            ruby.exception_type_error(),
-            format!("a key is a String, not {}", key.class()),
-        ));
-    };
-    String::from_utf8(string.to_bytes().to_vec()).map_err(|_| {
-        Error::new(
-            ruby.exception_range_error(),
-            "a key is UTF-8 text; these bytes are not UTF-8",
-        )
-    })
-}
-
 /// `ProbabilisticMachines.__hitter(key, count, overestimate)`: the members of a
 /// valid `Hitter`, the key a frozen UTF-8 copy so the value cannot change under
-/// the caller. `TypeError` for a key that is not a String or a count that is
-/// not an Integer; `RangeError` for a key that is not UTF-8, where
+/// the caller. `TypeError` for a key that is not exactly a String or a count
+/// that is not an Integer; `RangeError` for a key that is not UTF-8 text, where
 /// `Hitter::new` answers `None` (an overestimate not below the count) or a
 /// count is outside `0..2**64`.
 fn checked_hitter(
@@ -61,7 +43,7 @@ fn checked_hitter(
 ) -> Result<RArray, Error> {
     let count: u64 = integer(count, "count")?;
     let overestimate: u64 = integer(overestimate, "overestimate")?;
-    let key = utf8_key(ruby, key)?;
+    let key = utf8(key, "key")?;
     if Hitter::new((), count, overestimate).is_none() {
         return Err(Error::new(
             ruby.exception_range_error(),
@@ -78,10 +60,11 @@ fn checked_hitter(
 }
 
 /// `ProbabilisticMachines.__centroid(mean, weight)`: the members of a valid
-/// `Centroid`, as Floats. `TypeError` for a non-number; `RangeError` where
-/// `Centroid::new` answers `None` (a mean that is not finite, a weight that is
-/// not finite and positive).
-fn checked_centroid(ruby: &Ruby, mean: f64, weight: f64) -> Result<(f64, f64), Error> {
+/// `Centroid`, as Floats. `TypeError` for anything but a Float or an Integer;
+/// `RangeError` for a mean or weight that is not finite, and where
+/// `Centroid::new` answers `None` (a weight that is not positive).
+fn checked_centroid(ruby: &Ruby, mean: Value, weight: Value) -> Result<(f64, f64), Error> {
+    let (mean, weight) = (finite(mean, "mean")?, finite(weight, "weight")?);
     let Some(centroid) = Centroid::new(mean, weight) else {
         return Err(Error::new(
             ruby.exception_range_error(),

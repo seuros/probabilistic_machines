@@ -3,8 +3,8 @@
 use std::cell::RefCell;
 
 use magnus::typed_data::Obj;
-use magnus::{Error, RModule, RString, Ruby, TryConvert, Value, function, method, prelude::*};
-use matryona_machines::ruby::integer;
+use magnus::{Error, RModule, RString, Ruby, Value, function, method, prelude::*};
+use matryona_machines::ruby::{bytes, integer};
 use probabilistic_machines::{HyperLogLog, Refusal};
 
 use crate::{Pinned, answer, decoded_or_refused, define_class, partner, sizes, unsupported};
@@ -87,14 +87,17 @@ impl Wrapper {
     }
 
     /// `HyperLogLog.decode(bytes)`: a sketch, or the refusal symbol.
-    fn decode(ruby: &Ruby, bytes: RString) -> Value {
-        let bytes = bytes.to_bytes();
-        decoded_or_refused(ruby, decoded(&bytes).map(|held| Self(RefCell::new(held))))
+    fn decode(ruby: &Ruby, bytes: Value) -> Result<Value, Error> {
+        let bytes = self::bytes(bytes, "bytes")?;
+        Ok(decoded_or_refused(
+            ruby,
+            decoded(&bytes).map(|held| Self(RefCell::new(held))),
+        ))
     }
 
     fn decode_into(ruby: &Ruby, this: Obj<Self>, bytes: Value) -> Result<Value, Error> {
         this.check_frozen()?;
-        let bytes = RString::try_convert(bytes)?.to_bytes();
+        let bytes = self::bytes(bytes, "bytes")?;
         let outcome = sketch!(&mut *this.0.borrow_mut(), |sketch| sketch
             .decode_into(&bytes));
         Ok(answer(ruby, outcome, "decoded"))
@@ -106,7 +109,7 @@ impl Wrapper {
 
     fn add(this: Obj<Self>, item: Value) -> Result<(), Error> {
         this.check_frozen()?;
-        let item = RString::try_convert(item)?.to_bytes();
+        let item = bytes(item, "item")?;
         sketch!(&mut *this.0.borrow_mut(), |sketch| sketch.add(&item));
         Ok(())
     }
@@ -134,8 +137,7 @@ impl Wrapper {
     /// (in Rust that merge does not compile).
     fn merge(ruby: &Ruby, this: Obj<Self>, other: Value) -> Result<Value, Error> {
         this.check_frozen()?;
-        let message = "other must be a ProbabilisticMachines::HyperLogLog";
-        let other: Obj<Self> = partner(ruby, &CLASS, other, message)?;
+        let other: Obj<Self> = partner(ruby, &CLASS, other)?;
         let source = other.0.borrow().clone();
         let merged = match (&mut *this.0.borrow_mut(), &source) {
             (Sketch::M1024(target), Sketch::M1024(source)) => {

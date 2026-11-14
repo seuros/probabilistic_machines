@@ -4,13 +4,11 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
 use magnus::typed_data::Obj;
-use magnus::{
-    Error, RArray, RModule, RString, Ruby, TryConvert, Value, function, method, prelude::*,
-};
-use matryona_machines::ruby::integer;
+use magnus::{Error, RArray, RModule, RString, Ruby, Value, function, method, prelude::*};
+use matryona_machines::ruby::{bytes, integer, utf8};
 use probabilistic_machines::{HeavyHitters, Hitter, Refusal, hash64};
 
-use crate::data::{hitter, hitter_class, utf8_key};
+use crate::data::{hitter, hitter_class};
 use crate::{Pinned, answer, decoded_or_refused, define_class, partner, sizes, unsupported};
 
 /// Counter counts [`Table`] is monomorphised for.
@@ -140,19 +138,19 @@ impl Wrapper {
     }
 
     /// `HeavyHitters.decode(bytes)`: a table, or the refusal symbol.
-    fn decode(ruby: &Ruby, blob: RString) -> Value {
-        let blob = blob.to_bytes();
+    fn decode(ruby: &Ruby, blob: Value) -> Result<Value, Error> {
+        let blob = bytes(blob, "bytes")?;
         let held = decoded(&blob).map(|(table, names)| Self {
             table: RefCell::new(table),
             names: RefCell::new(names),
         });
-        decoded_or_refused(ruby, held)
+        Ok(decoded_or_refused(ruby, held))
     }
 
     /// `:decoded`, or the refusal symbol with the table and names untouched.
     fn decode_into(ruby: &Ruby, this: Obj<Self>, blob: Value) -> Result<Value, Error> {
         this.check_frozen()?;
-        let blob = RString::try_convert(blob)?.to_bytes();
+        let blob = bytes(blob, "bytes")?;
         let read = match &*this.table.borrow() {
             Table::K16(_) => decode_table(&blob).map(|(table, names)| (Table::K16(table), names)),
             Table::K64(_) => decode_table(&blob).map(|(table, names)| (Table::K64(table), names)),
@@ -171,13 +169,13 @@ impl Wrapper {
 
     fn add(ruby: &Ruby, this: Obj<Self>, key: Value) -> Result<Value, Error> {
         this.check_frozen()?;
-        let key = utf8_key(ruby, key)?;
+        let key = utf8(key, "key")?;
         Ok(Self::counted(ruby, this, key, 1))
     }
 
     fn add_count(ruby: &Ruby, this: Obj<Self>, key: Value, count: Value) -> Result<Value, Error> {
         this.check_frozen()?;
-        let key = utf8_key(ruby, key)?;
+        let key = utf8(key, "key")?;
         let count = integer(count, "count")?;
         Ok(Self::counted(ruby, this, key, count))
     }
@@ -194,8 +192,8 @@ impl Wrapper {
         answer(ruby, outcome, "added")
     }
 
-    fn count(ruby: &Ruby, this: &Self, key: Value) -> Result<u64, Error> {
-        let hash = hash64(utf8_key(ruby, key)?.as_bytes());
+    fn count(this: &Self, key: Value) -> Result<u64, Error> {
+        let hash = hash64(utf8(key, "key")?.as_bytes());
         Ok(table!(&*this.table.borrow(), |table| table.count(&hash)))
     }
 
@@ -236,8 +234,7 @@ impl Wrapper {
     /// counter count (in Rust that merge does not compile).
     fn merge(ruby: &Ruby, this: Obj<Self>, other: Value) -> Result<Value, Error> {
         this.check_frozen()?;
-        let message = "other must be a ProbabilisticMachines::HeavyHitters";
-        let other: Obj<Self> = partner(ruby, &CLASS, other, message)?;
+        let other: Obj<Self> = partner(ruby, &CLASS, other)?;
         let source = other.table.borrow().clone();
         let names = other.names.borrow().clone();
         let merged = match (&mut *this.table.borrow_mut(), &source) {

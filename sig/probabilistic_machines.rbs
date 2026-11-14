@@ -128,10 +128,10 @@ module ProbabilisticMachines
                     -> (:added | :not_finite | :invalid_weight | :overflow)
 
     # Value at quantile `q`, `Float::NAN` when empty.
-    def quantile: (Float q) -> Float
+    def quantile: (Float | Integer q) -> Float
 
     # Fraction of the stream at or below `value`, `Float::NAN` when empty.
-    def cdf: (Float value) -> Float
+    def cdf: (Float | Integer value) -> Float
 
     # Total weight added.
     def count: () -> Float
