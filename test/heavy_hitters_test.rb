@@ -175,15 +175,22 @@ module ProbabilisticMachines
     end
 
     # A key is exactly a String: a Symbol, a String subclass instance and an
-    # object answering to_str are TypeError, and the bytes are read natively,
-    # so a redefined #bytes or #to_s on the key changes nothing.
+    # object answering to_str are TypeError naming the class received, and the
+    # bytes are read natively, so a redefined #bytes or #to_s on the key
+    # changes nothing.
     def test_a_key_is_exactly_a_string
       table = HeavyHitters.new(16)
       to_str = Object.new.tap { |object| def object.to_str = 'k' }
       [:k, Class.new(String).new('k'), to_str, nil].each do |bad|
         [-> { table.add(bad) }, -> { table.add_count(bad, 2) }, -> { table.count(bad) },
          -> { Hitter.new(bad, 2, 1) }].each do |call|
-          assert_equal 'key must be a String', assert_raises(TypeError, &call).message
+          assert_match(/\Akey must be a String, not /, assert_raises(TypeError, &call).message)
+        end
+      end
+      { k: 'Symbol', 5 => 'Integer', nil => 'NilClass' }.each do |bad, received|
+        [-> { table.add(bad) }, -> { table.add_count(bad, 2) }, -> { table.count(bad) },
+         -> { Hitter.new(bad, 2, 1) }].each do |call|
+          assert_equal "key must be a String, not #{received}", assert_raises(TypeError, &call).message
         end
       end
       assert_equal 0, table.observed

@@ -5,10 +5,10 @@ use std::collections::{HashMap, HashSet};
 
 use magnus::typed_data::Obj;
 use magnus::{Error, RArray, RModule, RString, Ruby, Value, function, method, prelude::*};
-use matryona_machines::ruby::{bytes, integer, utf8};
+use matryona_machines::ruby::{bytes, integer};
 use probabilistic_machines::{HeavyHitters, Hitter, Refusal, hash64};
 
-use crate::data::{hitter, hitter_class};
+use crate::data::{hitter, hitter_class, utf8_key};
 use crate::{Pinned, answer, decoded_or_refused, define_class, partner, sizes, unsupported};
 
 /// Counter counts [`Table`] is monomorphised for.
@@ -169,13 +169,13 @@ impl Wrapper {
 
     fn add(ruby: &Ruby, this: Obj<Self>, key: Value) -> Result<Value, Error> {
         this.check_frozen()?;
-        let key = utf8(key, "key")?;
+        let key = utf8_key(key)?;
         Ok(Self::counted(ruby, this, key, 1))
     }
 
     fn add_count(ruby: &Ruby, this: Obj<Self>, key: Value, count: Value) -> Result<Value, Error> {
         this.check_frozen()?;
-        let key = utf8(key, "key")?;
+        let key = utf8_key(key)?;
         let count = integer(count, "count")?;
         Ok(Self::counted(ruby, this, key, count))
     }
@@ -193,7 +193,7 @@ impl Wrapper {
     }
 
     fn count(this: &Self, key: Value) -> Result<u64, Error> {
-        let hash = hash64(utf8(key, "key")?.as_bytes());
+        let hash = hash64(utf8_key(key)?.as_bytes());
         Ok(table!(&*this.table.borrow(), |table| table.count(&hash)))
     }
 

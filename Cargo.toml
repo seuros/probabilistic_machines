@@ -8,7 +8,7 @@ rust-version = "1.99"
 
 [workspace.dependencies]
 probabilistic-machines = { path = "ext/probabilistic_machines_native/core" }
-matryona-machines = { version = ">=0.3", default-features = false }
+matryona-machines = { version = ">=0.4", default-features = false }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

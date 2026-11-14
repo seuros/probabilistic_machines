@@ -6,7 +6,7 @@
 //! constructor: `Hitter::new` and `Centroid::new`.
 
 use magnus::{Error, RArray, RClass, RModule, Ruby, Value, function, prelude::*};
-use matryona_machines::ruby::{Class, Registry, finite, integer, utf8};
+use matryona_machines::ruby::{Class, Registry, finite, integer, utf8_with};
 use probabilistic_machines::{Centroid, Hitter};
 
 /// `Hitter` and `Centroid`, resolved once at init and pinned:
@@ -29,6 +29,15 @@ pub fn define(ruby: &Ruby, module: RModule) -> Result<(), Error> {
     Ok(())
 }
 
+/// A key as the table hashes it: exactly a String of UTF-8 text.
+/// `TypeError` naming the class it got, `RangeError` for bytes that are not
+/// UTF-8 text.
+pub fn utf8_key(value: Value) -> Result<String, Error> {
+    utf8_with(value, "key", || {
+        format!("key must be a String, not {}", value.class())
+    })
+}
+
 /// `ProbabilisticMachines.__hitter(key, count, overestimate)`: the members of a
 /// valid `Hitter`, the key a frozen UTF-8 copy so the value cannot change under
 /// the caller. `TypeError` for a key that is not exactly a String or a count
@@ -43,7 +52,7 @@ fn checked_hitter(
 ) -> Result<RArray, Error> {
     let count: u64 = integer(count, "count")?;
     let overestimate: u64 = integer(overestimate, "overestimate")?;
-    let key = utf8(key, "key")?;
+    let key = utf8_key(key)?;
     if Hitter::new((), count, overestimate).is_none() {
         return Err(Error::new(
             ruby.exception_range_error(),
