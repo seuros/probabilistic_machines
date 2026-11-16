@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.6.0](https://github.com/seuros/probabilistic_machines/compare/probabilistic-machines-v0.5.0...probabilistic-machines-v0.6.0) (2026-11-16)
+
+
+### ⚠ BREAKING CHANGES
+
+* refuse a TDigest quantile outside 0..=1
+
+### Features
+
+* refuse a TDigest quantile outside 0..=1 ([848858f](https://github.com/seuros/probabilistic_machines/commit/848858fd54ce7d158d419584dafa811efd25bda4))
+
 ## [0.5.0](https://github.com/seuros/probabilistic_machines/compare/probabilistic-machines-v0.4.0...probabilistic-machines-v0.5.0) (2026-11-14)
 
 
