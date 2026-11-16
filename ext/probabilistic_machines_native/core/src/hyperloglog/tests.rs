@@ -1,4 +1,4 @@
-use super::{HyperLogLog, linear_count};
+use super::{HyperLogLog, linear_count, pow2_neg};
 use crate::Refusal;
 use crate::hash::mix64;
 
@@ -226,4 +226,17 @@ fn linear_counting_is_bit_for_bit_reproducible() {
     let mut sketch = HyperLogLog::<1024>::new();
     fill(&mut sketch, 0..100);
     assert_eq!(sketch.estimate().to_bits(), sketch.estimate().to_bits());
+}
+
+#[test]
+fn powers_from_bits_equal_repeated_halving() {
+    let mut halved = 1.0_f64;
+    for exponent in 0..=64 {
+        assert_eq!(
+            pow2_neg(exponent).to_bits(),
+            halved.to_bits(),
+            "2^-{exponent}"
+        );
+        halved *= 0.5;
+    }
 }

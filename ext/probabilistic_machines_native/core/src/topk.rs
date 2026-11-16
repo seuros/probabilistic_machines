@@ -1,13 +1,14 @@
 //! Which keys dominate a stream, in `K` counters instead of one per key.
 
 use crate::hash::usize_low_u16;
-use crate::{Refusal, TAG_TOPK, open_frame, read8};
+use crate::{Refusal, TAG_TOPK, open_frame};
 
+/// Tag, the two-byte counter count, the eight-byte observation count and the
+/// two-byte tracked count.
 const HEADER_LEN: usize = 13;
-const RECORD_LEN: usize = 24;
-/// Where a record's count and overestimate begin, after its key.
-const COUNT_AT: usize = 8;
-const OVERESTIMATE_AT: usize = 16;
+/// Bytes of one record field: key, count, overestimate, in that order.
+const FIELD_LEN: usize = 8;
+const RECORD_LEN: usize = 3 * FIELD_LEN;
 
 /// A tracked key, its counter, and how much of that counter it may have
 /// inherited from keys evicted before it or from a merged-in stream that
@@ -176,8 +177,8 @@ impl<T: Clone + Eq, const K: usize> HeavyHitters<T, K> {
         let Some(observed) = self.observed.checked_add(count) else {
             return Err(Refusal::Overflow);
         };
-        let (index, hitter) = self.absorbed(key, count, 0)?;
-        self.slots[index] = Some(hitter);
+        let (slot, hitter) = self.absorbed(key, count, 0)?;
+        *slot = Some(hitter);
         self.observed = observed;
         Ok(())
     }
@@ -212,9 +213,9 @@ impl<T: Clone + Eq, const K: usize> HeavyHitters<T, K> {
             }
         }
         for hitter in other.hitters() {
-            let (index, absorbed) =
+            let (slot, absorbed) =
                 merged.absorbed(hitter.key.clone(), hitter.count, hitter.overestimate)?;
-            merged.slots[index] = Some(absorbed);
+            *slot = Some(absorbed);
         }
         merged.observed = observed;
         *self = merged;
@@ -232,51 +233,57 @@ impl<T: Clone + Eq, const K: usize> HeavyHitters<T, K> {
 
     /// Where `key` goes and what it holds once `count` and `overestimate` are
     /// added: its own slot if tracked, else the first free one, else the
-    /// weakest counter's, which it takes over along with that counter as its
-    /// floor. Computes without storing, so a caller can refuse first.
+    /// weakest counter's (the first of the lowest), which it takes over along
+    /// with that counter as its floor. Computes without storing, so a caller
+    /// can refuse first.
     fn absorbed(
-        &self,
+        &mut self,
         key: T,
         count: u64,
         overestimate: u64,
-    ) -> Result<(usize, Hitter<T>), Refusal> {
+    ) -> Result<(&mut Option<Hitter<T>>, Hitter<T>), Refusal> {
         let mut free = None;
-        let mut weakest = 0;
-        let mut floor = u64::MAX;
-        for (index, slot) in self.slots.iter().enumerate() {
-            match slot {
-                Some(tracked) if tracked.key == key => {
+        let mut weakest: Option<(&mut Option<Hitter<T>>, u64)> = None;
+        for slot in &mut self.slots {
+            match slot.as_ref().map(|tracked| (tracked.key == key, tracked)) {
+                Some((true, tracked)) => {
                     let base = (tracked.count, tracked.overestimate);
-                    return Self::raised(index, key, base, count, overestimate);
+                    return Self::raised(slot, key, base, count, overestimate);
                 }
-                Some(tracked) => {
-                    if tracked.count < floor {
-                        floor = tracked.count;
-                        weakest = index;
+                Some((false, tracked)) => {
+                    let held = tracked.count;
+                    if weakest.as_ref().is_none_or(|(_, floor)| held < *floor) {
+                        weakest = Some((slot, held));
                     }
                 }
                 None => {
                     if free.is_none() {
-                        free = Some(index);
+                        free = Some(slot);
                     }
                 }
             }
         }
-        match free {
-            Some(index) => Self::raised(index, key, (0, 0), count, overestimate),
-            None => Self::raised(weakest, key, (floor, floor), count, overestimate),
+        match (free, weakest) {
+            (Some(slot), _) => Self::raised(slot, key, (0, 0), count, overestimate),
+            (None, Some((slot, floor))) => {
+                Self::raised(slot, key, (floor, floor), count, overestimate)
+            }
+            (None, None) => {
+                debug_assert!(false, "K >= 1 is checked when the table is built");
+                Err(Refusal::Full)
+            }
         }
     }
 
-    /// A hitter for `key` at `index` holding `base` (count, overestimate)
-    /// raised by `count` and `overestimate`.
+    /// `slot` with the hitter for `key` it would hold: `base` (count,
+    /// overestimate) raised by `count` and `overestimate`.
     fn raised(
-        index: usize,
+        slot: &mut Option<Hitter<T>>,
         key: T,
         base: (u64, u64),
         count: u64,
         overestimate: u64,
-    ) -> Result<(usize, Hitter<T>), Refusal> {
+    ) -> Result<(&mut Option<Hitter<T>>, Hitter<T>), Refusal> {
         let (Some(count), Some(overestimate)) =
             (base.0.checked_add(count), base.1.checked_add(overestimate))
         else {
@@ -287,7 +294,7 @@ impl<T: Clone + Eq, const K: usize> HeavyHitters<T, K> {
             count,
             overestimate,
         };
-        Ok((index, hitter))
+        Ok((slot, hitter))
     }
 }
 
@@ -310,18 +317,20 @@ impl<const K: usize> HeavyHitters<u64, K> {
     );
 
     /// Fills a frame of exactly [`ENCODED_LEN`](Self::ENCODED_LEN) bytes.
-    fn write_frame(&self, frame: &mut [u8]) {
-        frame[0] = TAG_TOPK;
-        frame[1..3].copy_from_slice(&Self::COUNTERS);
-        frame[3..11].copy_from_slice(&self.observed.to_le_bytes());
-        frame[11..13].copy_from_slice(&usize_low_u16(self.len()).to_le_bytes());
-        frame[HEADER_LEN..].fill(0);
+    fn write_frame(&self, header: &mut [u8; HEADER_LEN], body: &mut [u8]) {
+        let [tag, k0, k1, observed @ .., n0, n1] = header;
+        *tag = TAG_TOPK;
+        [*k0, *k1] = Self::COUNTERS;
+        *observed = self.observed.to_le_bytes();
+        [*n0, *n1] = usize_low_u16(self.len()).to_le_bytes();
+        body.fill(0);
 
-        let (slots, _) = frame[HEADER_LEN..].as_chunks_mut::<RECORD_LEN>();
-        for (slot, hitter) in slots.iter_mut().zip(self.hitters()) {
-            slot[..COUNT_AT].copy_from_slice(&hitter.key.to_le_bytes());
-            slot[COUNT_AT..OVERESTIMATE_AT].copy_from_slice(&hitter.count.to_le_bytes());
-            slot[OVERESTIMATE_AT..].copy_from_slice(&hitter.overestimate.to_le_bytes());
+        for (slot, hitter) in records_in_mut(body).iter_mut().zip(self.hitters()) {
+            *slot = [
+                hitter.key.to_le_bytes(),
+                hitter.count.to_le_bytes(),
+                hitter.overestimate.to_le_bytes(),
+            ];
         }
     }
 
@@ -350,41 +359,59 @@ impl<const K: usize> HeavyHitters<u64, K> {
     ///
     /// The same as [`decode`](Self::decode).
     pub fn decode_into(&mut self, bytes: &[u8]) -> Result<(), Refusal> {
-        let frame = open_frame(bytes, Self::ENCODED_LEN, TAG_TOPK)?;
-        if frame[1..3] != Self::COUNTERS {
+        let (header, body) = open_frame::<HEADER_LEN>(bytes, Self::ENCODED_LEN, TAG_TOPK)?;
+        let [_, k0, k1, observed @ .., n0, n1] = *header;
+        if [k0, k1] != Self::COUNTERS {
             return Err(Refusal::WrongShape);
         }
-        let tracked = usize::from(u16::from_le_bytes([frame[11], frame[12]]));
-        if tracked > K {
+        // The body holds exactly `K` records, so this refuses exactly the
+        // tracked counts above `K`.
+        let tracked = usize::from(u16::from_le_bytes([n0, n1]));
+        let Some((records, unused)) = records_in(body).split_at_checked(tracked) else {
             return Err(Refusal::Malformed);
-        }
+        };
 
-        let observed = u64::from_le_bytes(read8(&frame[3..11]));
-        let (slots, _) = frame[HEADER_LEN..].as_chunks::<RECORD_LEN>();
-        let (records, unused) = slots.split_at(tracked);
+        let observed = u64::from_le_bytes(observed);
         // `encode` zeroes every slot past the tracked records: one frame per
         // state, so anything else there is not a frame this table wrote.
-        if unused.as_flattened().iter().any(|byte| *byte != 0)
+        if unused
+            .as_flattened()
+            .as_flattened()
+            .iter()
+            .any(|byte| *byte != 0)
             || !records_are_coherent(records, observed)
         {
             return Err(Refusal::Malformed);
         }
 
         self.observed = observed;
-        for (slot, record) in self.slots.iter_mut().zip(records) {
-            *slot = Some(hitter(record));
+        let mut records = records.iter();
+        for slot in &mut self.slots {
+            *slot = records.next().map(hitter);
         }
-        self.slots[tracked..].fill(None);
         Ok(())
     }
 }
 
+/// One record: its key, count and overestimate fields.
+type Record = [[u8; FIELD_LEN]; 3];
+
+/// The whole records `body` holds.
+const fn records_in(body: &[u8]) -> &[Record] {
+    body.as_chunks::<FIELD_LEN>().0.as_chunks::<3>().0
+}
+
+/// The whole records `body` holds, to fill.
+const fn records_in_mut(body: &mut [u8]) -> &mut [Record] {
+    body.as_chunks_mut::<FIELD_LEN>().0.as_chunks_mut::<3>().0
+}
+
 /// A record as the hitter it stands for.
-fn hitter(record: &[u8; RECORD_LEN]) -> Hitter<u64> {
+const fn hitter(&[key, count, overestimate]: &Record) -> Hitter<u64> {
     Hitter {
-        key: u64::from_le_bytes(read8(&record[..COUNT_AT])),
-        count: u64::from_le_bytes(read8(&record[COUNT_AT..OVERESTIMATE_AT])),
-        overestimate: u64::from_le_bytes(read8(&record[OVERESTIMATE_AT..])),
+        key: u64::from_le_bytes(key),
+        count: u64::from_le_bytes(count),
+        overestimate: u64::from_le_bytes(overestimate),
     }
 }
 
@@ -397,13 +424,16 @@ fn hitter(record: &[u8; RECORD_LEN]) -> Hitter<u64> {
 /// other table evicted to that table's eviction floor and widens the
 /// overestimate with it, so the two tables' floors can stack above the two
 /// streams' length while the occurrences the interval claims stay inside it.
-fn records_are_coherent(records: &[[u8; RECORD_LEN]], observed: u64) -> bool {
+fn records_are_coherent(records: &[Record], observed: u64) -> bool {
     records.iter().enumerate().all(|(index, record)| {
         let tracked = hitter(record);
-        tracked.overestimate < tracked.count
-            && tracked.count - tracked.overestimate <= observed
-            && records[..index]
+        tracked
+            .count
+            .checked_sub(tracked.overestimate)
+            .is_some_and(|claimed| claimed > 0 && claimed <= observed)
+            && records
                 .iter()
+                .take(index)
                 .all(|earlier| hitter(earlier).key != tracked.key)
     })
 }

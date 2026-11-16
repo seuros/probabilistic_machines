@@ -73,8 +73,11 @@ hll.merge(other)                    # :merged, exact union; :wrong_shape for ano
 
 Nothing here refuses but a merge across sizes: registers only rise, so `add`
 and `merge` are idempotent and have no limit to hit. The estimate is the same
-Float on every machine: linear counting takes its logarithm in integer fixed
-point from `sliderule-machines`, within `10^-10` items of the exact value.
+Float on every machine whose `f64` is IEEE 754 binary64, rounded per operation:
+linear counting takes its logarithm in integer fixed point from
+`sliderule-machines`, within `10^-10` items of the exact value. A target that
+evaluates in wider registers (32-bit x86 with the x87 FPU, no SSE2) may round
+differently in the last bit.
 
 Memory is one byte per register, so 4096 registers cost 4 KiB whether the stream
 held ten ids or ten billion.
@@ -126,7 +129,9 @@ weight bound.
 
 A quantile is off by about `1 / compression` of the distribution in the middle
 and is exact at the extremes, in `compression * ln(n)` clusters rather than `n`
-samples. An empty digest answers `Float::NAN`.
+samples. An empty digest answers `Float::NAN`. `quantile(q)` raises
+`RangeError` for a `q` outside `0..=1`, NaN included; the Rust core answers
+`f64::NAN` there instead.
 
 ---
 
@@ -232,6 +237,12 @@ restored.top.key # => '10.0.0.1', the string, not its hash
 - **One honoured repeat.** `CuckooFilter#remove` of an item whose fingerprint
   is in neither bucket answers `:not_held` and changes nothing. Nothing else is
   a repeat: a second `insert` stores a second copy, a second `add` counts again.
+- **Determinism assumes binary64.** Every Float answer (estimates,
+  quantiles, cdf) is the same bits for the same state on any machine whose
+  `f64` arithmetic is IEEE 754 binary64 with one rounding per operation,
+  which is every 64-bit target Ruby runs on. x87 extended-precision
+  evaluation is outside that promise. Frames carry raw bits, so a blob
+  decodes to the same state everywhere.
 - **No clock, no ids, no restarts.** No sketch reads time or issues a handle;
   what survives a restart is what you `encoded`.
 

@@ -1,6 +1,7 @@
 //! Sketches that answer questions about a stream in less memory than the
 //! stream: `HyperLogLog`, count-min, cuckoo filter, heavy hitters and t-digest.
 #![no_std]
+#![cfg_attr(not(test), deny(clippy::indexing_slicing))]
 
 #[cfg(feature = "alloc")]
 extern crate alloc;
@@ -14,7 +15,8 @@ extern crate std;
 struct ReadmeDoctests;
 
 /// Defines a fixed-size sketch's `encode` and `encoded` over its private
-/// `write_frame`, which fills a frame of exactly `ENCODED_LEN` bytes. `$noun`
+/// `write_frame`, which fills the header and body of a frame of exactly
+/// `ENCODED_LEN` bytes. `$noun`
 /// names the sketch in the docs; the `$about` pieces, joined, describe its
 /// frame.
 macro_rules! encoders {
@@ -30,14 +32,18 @@ macro_rules! encoders {
         /// [`Refusal::Truncated`] when `out` is shorter than
         /// [`ENCODED_LEN`](Self::ENCODED_LEN).
         pub fn encode(&self, out: &mut [u8]) -> Result<usize, Refusal> {
-            $crate::encode_frame(out, Self::ENCODED_LEN, |frame| self.write_frame(frame))
+            $crate::encode_frame(out, Self::ENCODED_LEN, |header, body| {
+                self.write_frame(header, body);
+            })
         }
 
         #[doc = concat!("The ", $noun, "'s frame, [`ENCODED_LEN`](Self::ENCODED_LEN) bytes long.")]
         #[cfg(feature = "alloc")]
         #[must_use]
         pub fn encoded(&self) -> alloc::boxed::Box<[u8]> {
-            $crate::encoded_frame(Self::ENCODED_LEN, |frame| self.write_frame(frame))
+            $crate::encoded_frame(Self::ENCODED_LEN, |header, body| {
+                self.write_frame(header, body);
+            })
         }
     };
 }
@@ -118,44 +124,64 @@ pub(crate) const TAG_COUNTMIN: u8 = 0xC1;
 pub(crate) const TAG_TDIGEST: u8 = 0xD1;
 pub(crate) const TAG_CUCKOO: u8 = 0xF1;
 
-/// The first eight bytes of a field, for the little-endian scalars the frames
-/// are built from.
-pub(crate) const fn read8(bytes: &[u8]) -> [u8; 8] {
-    let mut buffer = [0_u8; 8];
-    buffer.copy_from_slice(bytes);
-    buffer
-}
-
-/// Fills the first `len` bytes of `out` through `write`, for the fixed-size
-/// frames every sketch encodes to.
-pub(crate) fn encode_frame(
+/// Fills the first `len` bytes of `out` through `write`, handed the `H`-byte
+/// header and the body after it, for the frames every sketch encodes to.
+///
+/// # Errors
+///
+/// [`Refusal::Truncated`] when `out` is shorter than `len`. Every frame is at
+/// least its header long, so `len` never falls short of `H`; were it to, the
+/// frame could not be written and the answer is the same refusal, with `out`
+/// untouched.
+pub(crate) fn encode_frame<const H: usize>(
     out: &mut [u8],
     len: usize,
-    write: impl FnOnce(&mut [u8]),
+    write: impl FnOnce(&mut [u8; H], &mut [u8]),
 ) -> Result<usize, Refusal> {
-    let Some(frame) = out.get_mut(..len) else {
+    let Some((header, body)) = out
+        .get_mut(..len)
+        .and_then(<[u8]>::split_first_chunk_mut::<H>)
+    else {
         return Err(Refusal::Truncated);
     };
-    write(frame);
+    write(header, body);
     Ok(len)
 }
 
-/// A freshly allocated `len`-byte frame filled through `write`.
+/// A freshly allocated `len`-byte frame filled through `write`, handed the
+/// `H`-byte header and the body after it.
 #[cfg(feature = "alloc")]
-pub(crate) fn encoded_frame(len: usize, write: impl FnOnce(&mut [u8])) -> alloc::boxed::Box<[u8]> {
+pub(crate) fn encoded_frame<const H: usize>(
+    len: usize,
+    write: impl FnOnce(&mut [u8; H], &mut [u8]),
+) -> alloc::boxed::Box<[u8]> {
     let mut frame = alloc::vec![0_u8; len].into_boxed_slice();
-    write(&mut frame);
+    if let Some((header, body)) = frame.split_first_chunk_mut::<H>() {
+        write(header, body);
+    } else {
+        // An all-zero frame carries no tag, so every decoder refuses it.
+        debug_assert!(false, "every frame is at least its header long");
+    }
     frame
 }
 
-/// The first `len` bytes of `bytes`, once they are known to be a frame tagged
-/// `tag`.
-pub(crate) fn open_frame(bytes: &[u8], len: usize, tag: u8) -> Result<&[u8], Refusal> {
-    let Some(frame) = bytes.get(..len) else {
+/// The `H`-byte header and the body of the first `len` bytes of `bytes`,
+/// once they are known to be a frame tagged `tag`.
+///
+/// # Errors
+///
+/// [`Refusal::Truncated`] when `bytes` is shorter than `len` or than the
+/// header, [`Refusal::WrongStructure`] when the tag names another structure.
+pub(crate) fn open_frame<const H: usize>(
+    bytes: &[u8],
+    len: usize,
+    tag: u8,
+) -> Result<(&[u8; H], &[u8]), Refusal> {
+    let Some((header, body)) = bytes.get(..len).and_then(<[u8]>::split_first_chunk::<H>) else {
         return Err(Refusal::Truncated);
     };
-    if frame[0] != tag {
+    if header.first() != Some(&tag) {
         return Err(Refusal::WrongStructure);
     }
-    Ok(frame)
+    Ok((header, body))
 }

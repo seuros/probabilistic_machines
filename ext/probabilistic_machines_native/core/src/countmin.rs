@@ -1,13 +1,13 @@
 //! Frequency estimation for a stream nobody wants to store.
 
 use crate::hash::{hash64, mix64, u32_low_u8, u64_low_u16, usize_low_u8};
-use crate::{Refusal, TAG_COUNTMIN, open_frame, read8};
+use crate::{Refusal, TAG_COUNTMIN, open_frame};
 
+/// Tag, width bits, depth, the eight-byte total, then one reserved byte: the
+/// byte that once flagged a saturated counter. No counter saturates any more,
+/// so it is written as zero and a frame carrying anything else (one an earlier
+/// release wrote after a counter stopped at `u32::MAX`) is refused.
 const HEADER_LEN: usize = 12;
-/// Header byte that once flagged a saturated counter. No counter saturates any
-/// more, so it is written as zero and a frame carrying anything else (one an
-/// earlier release wrote after a counter stopped at `u32::MAX`) is refused.
-const RESERVED_AT: usize = 11;
 const COUNTER_LEN: usize = 4;
 
 /// Counts how often each item appeared, in `W * D` counters.
@@ -103,18 +103,22 @@ impl<const W: usize, const D: usize> CountMinSketch<W, D> {
         if count == 0 {
             return Err(Refusal::ZeroCount);
         }
-        let mut raised = [(0_usize, 0_u32); D];
+        let mut raised: [Option<(&mut u32, u32)>; D] = [const { None }; D];
         let mut cursor = hash;
-        for (row, target) in self.rows.iter().zip(&mut raised) {
+        for (row, target) in self.rows.iter_mut().zip(&mut raised) {
             cursor = mix64(cursor);
             let column = usize::from(u64_low_u16(cursor)) & Self::COLUMN_MASK;
-            let Some(sum) = row[column].checked_add(count) else {
+            let Some(counter) = row.get_mut(column) else {
+                debug_assert!(false, "a column is masked below W");
                 return Err(Refusal::Overflow);
             };
-            *target = (column, sum);
+            let Some(sum) = counter.checked_add(count) else {
+                return Err(Refusal::Overflow);
+            };
+            *target = Some((counter, sum));
         }
-        for (row, (column, sum)) in self.rows.iter_mut().zip(raised) {
-            row[column] = sum;
+        for (counter, sum) in raised.into_iter().flatten() {
+            *counter = sum;
         }
         Ok(())
     }
@@ -133,8 +137,11 @@ impl<const W: usize, const D: usize> CountMinSketch<W, D> {
         for row in &self.rows {
             cursor = mix64(cursor);
             let column = usize::from(u64_low_u16(cursor)) & Self::COLUMN_MASK;
-            if row[column] < smallest {
-                smallest = row[column];
+            // The column is masked below `W`, so the lookup always lands.
+            if let Some(&held) = row.get(column)
+                && held < smallest
+            {
+                smallest = held;
             }
         }
         smallest
@@ -168,15 +175,16 @@ impl<const W: usize, const D: usize> CountMinSketch<W, D> {
     encoders!("sketch");
 
     /// Fills a frame of exactly [`ENCODED_LEN`](Self::ENCODED_LEN) bytes.
-    fn write_frame(&self, frame: &mut [u8]) {
-        frame[0] = TAG_COUNTMIN;
-        frame[1] = u32_low_u8(W.trailing_zeros());
-        frame[2] = usize_low_u8(D);
-        frame[3..11].copy_from_slice(&self.total().to_le_bytes());
-        frame[RESERVED_AT] = 0;
+    fn write_frame(&self, header: &mut [u8; HEADER_LEN], body: &mut [u8]) {
+        let [tag, bits, depth, total @ .., reserved] = header;
+        *tag = TAG_COUNTMIN;
+        *bits = u32_low_u8(W.trailing_zeros());
+        *depth = usize_low_u8(D);
+        *total = self.total().to_le_bytes();
+        *reserved = 0;
 
         let counters = self.rows.iter().flatten();
-        let (slots, _) = frame[HEADER_LEN..].as_chunks_mut::<COUNTER_LEN>();
+        let (slots, _) = body.as_chunks_mut::<COUNTER_LEN>();
         for (slot, counter) in slots.iter_mut().zip(counters) {
             *slot = counter.to_le_bytes();
         }
@@ -207,14 +215,15 @@ impl<const W: usize, const D: usize> CountMinSketch<W, D> {
     ///
     /// The same as [`decode`](Self::decode).
     pub fn decode_into(&mut self, bytes: &[u8]) -> Result<(), Refusal> {
-        let frame = open_frame(bytes, Self::ENCODED_LEN, TAG_COUNTMIN)?;
-        if frame[1] != u32_low_u8(W.trailing_zeros()) || frame[2] != usize_low_u8(D) {
+        let (header, body) = open_frame::<HEADER_LEN>(bytes, Self::ENCODED_LEN, TAG_COUNTMIN)?;
+        let [_, bits, depth, total @ .., reserved] = *header;
+        if bits != u32_low_u8(W.trailing_zeros()) || depth != usize_low_u8(D) {
             return Err(Refusal::WrongShape);
         }
 
-        let total = u64::from_le_bytes(read8(&frame[3..11]));
-        let (slots, _) = frame[HEADER_LEN..].as_chunks::<COUNTER_LEN>();
-        if frame[RESERVED_AT] != 0 || !Self::rows_are_coherent(slots, total) {
+        let total = u64::from_le_bytes(total);
+        let (slots, _) = body.as_chunks::<COUNTER_LEN>();
+        if reserved != 0 || !Self::rows_are_coherent(slots, total) {
             return Err(Refusal::Malformed);
         }
 

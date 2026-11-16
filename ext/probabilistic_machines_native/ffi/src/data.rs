@@ -6,7 +6,9 @@
 //! constructor: `Hitter::new` and `Centroid::new`.
 
 use magnus::{Error, RArray, RClass, RModule, Ruby, Value, function, prelude::*};
-use matryona_machines::ruby::{Class, Registry, finite, integer, utf8_with};
+use matryona_machines::ruby::{
+    Class, Registry, bytes_with, class_name, finite, integer, utf8_with,
+};
 use probabilistic_machines::{Centroid, Hitter};
 
 /// `Hitter` and `Centroid`, resolved once at init and pinned:
@@ -34,7 +36,15 @@ pub fn define(ruby: &Ruby, module: RModule) -> Result<(), Error> {
 /// UTF-8 text.
 pub fn utf8_key(value: Value) -> Result<String, Error> {
     utf8_with(value, "key", || {
-        format!("key must be a String, not {}", value.class())
+        format!("key must be a String, not {}", class_name(value))
+    })
+}
+
+/// An item or a frame: the bytes of exactly a String, in any encoding.
+/// `TypeError` naming the argument and the class it got, as a key does.
+pub fn bytes(value: Value, name: &str) -> Result<Vec<u8>, Error> {
+    bytes_with(value, || {
+        format!("{name} must be a String, not {}", class_name(value))
     })
 }
 

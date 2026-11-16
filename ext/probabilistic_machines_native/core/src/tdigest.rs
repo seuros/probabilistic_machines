@@ -2,10 +2,15 @@
 
 use alloc::vec::Vec;
 
-use crate::{Refusal, TAG_TDIGEST, open_frame, read8};
+use crate::{Refusal, TAG_TDIGEST, open_frame};
 
+/// Tag, the two-byte compression, the four-byte cluster count, then the
+/// eight-byte total weight, minimum and maximum.
 const HEADER_LEN: usize = 31;
-const CENTROID_LEN: usize = 16;
+/// Bytes of one scalar field.
+const FIELD_LEN: usize = 8;
+/// A centroid's mean then weight.
+const CENTROID_LEN: usize = 2 * FIELD_LEN;
 
 /// Smallest compression a digest is built with. Below it a cluster may hold
 /// more than 40% of the stream around the median, so a quantile there says
@@ -213,10 +218,11 @@ impl TDigest {
         Ok(())
     }
 
-    /// Value at quantile `q`, [`f64::NAN`] when empty.
+    /// Value at quantile `q`, [`f64::NAN`] when empty or when `q` is not in
+    /// `0.0..=1.0` (NaN included): no rank outside the stream has a value.
     #[must_use]
     pub fn quantile(&self, q: f64) -> f64 {
-        if self.centroids.is_empty() {
+        if self.centroids.is_empty() || !(0.0..=1.0).contains(&q) {
             return f64::NAN;
         }
 
@@ -344,6 +350,8 @@ impl TDigest {
     /// Bytes [`encode`](Self::encode) needs, which grows with the cluster count.
     #[must_use]
     pub const fn encoded_len(&self) -> usize {
+        // The cluster count is capped by the capacity, `compression * 10`, so
+        // this stays below ten megabytes.
         HEADER_LEN + self.centroids.len() * CENTROID_LEN
     }
 
@@ -358,33 +366,42 @@ impl TDigest {
     /// [`Refusal::Truncated`] when `out` is shorter than
     /// [`encoded_len`](Self::encoded_len).
     pub fn encode(&self, out: &mut [u8]) -> Result<usize, Refusal> {
-        crate::encode_frame(out, self.encoded_len(), |frame| self.write_frame(frame))
+        crate::encode_frame(out, self.encoded_len(), |header, body| {
+            self.write_frame(header, body);
+        })
     }
 
     /// The digest's frame, exactly [`encoded_len`](Self::encoded_len) bytes.
     #[must_use]
     pub fn encoded(&self) -> alloc::boxed::Box<[u8]> {
-        crate::encoded_frame(self.encoded_len(), |frame| self.write_frame(frame))
+        crate::encoded_frame(self.encoded_len(), |header, body| {
+            self.write_frame(header, body);
+        })
     }
 
     /// Fills a frame of exactly [`encoded_len`](Self::encoded_len) bytes.
-    fn write_frame(&self, frame: &mut [u8]) {
+    fn write_frame(&self, header: &mut [u8; HEADER_LEN], body: &mut [u8]) {
         #[expect(
             clippy::cast_possible_truncation,
             reason = "capacity caps the cluster count at compression * CLUSTERS_PER_COMPRESSION"
         )]
         let clusters = self.centroids.len() as u32;
-        frame[0] = TAG_TDIGEST;
-        frame[1..3].copy_from_slice(&self.compression.to_le_bytes());
-        frame[3..7].copy_from_slice(&clusters.to_le_bytes());
-        frame[7..15].copy_from_slice(&self.count.to_le_bytes());
-        frame[15..23].copy_from_slice(&self.minimum.to_le_bytes());
-        frame[23..31].copy_from_slice(&self.maximum.to_le_bytes());
+        let [tag, c0, c1, n0, n1, n2, n3, scalars @ ..] = header;
+        *tag = TAG_TDIGEST;
+        [*c0, *c1] = self.compression.to_le_bytes();
+        [*n0, *n1, *n2, *n3] = clusters.to_le_bytes();
+        let (fields, _) = scalars.as_chunks_mut::<FIELD_LEN>();
+        for (field, value) in fields
+            .iter_mut()
+            .zip([self.count, self.minimum, self.maximum])
+        {
+            *field = value.to_le_bytes();
+        }
 
-        let (slots, _) = frame[HEADER_LEN..].as_chunks_mut::<CENTROID_LEN>();
+        let (fields, _) = body.as_chunks_mut::<FIELD_LEN>();
+        let (slots, _) = fields.as_chunks_mut::<2>();
         for (slot, centroid) in slots.iter_mut().zip(&self.centroids) {
-            slot[..8].copy_from_slice(&centroid.mean.to_le_bytes());
-            slot[8..].copy_from_slice(&centroid.weight.to_le_bytes());
+            *slot = [centroid.mean.to_le_bytes(), centroid.weight.to_le_bytes()];
         }
     }
 
@@ -399,28 +416,36 @@ impl TDigest {
     /// [`MIN_COMPRESSION`] or the clusters, the total weight and the extremes
     /// contradict each other.
     pub fn decode(bytes: &[u8]) -> Result<Self, Refusal> {
-        let header = open_frame(bytes, HEADER_LEN, TAG_TDIGEST)?;
-        let counted = u32::from_le_bytes([header[3], header[4], header[5], header[6]]);
-        let Ok(clusters) = usize::try_from(counted) else {
+        let (header, body) = open_frame::<HEADER_LEN>(bytes, bytes.len(), TAG_TDIGEST)?;
+        let [_, c0, c1, n0, n1, n2, n3, scalars @ ..] = *header;
+        let Ok(clusters) = usize::try_from(u32::from_le_bytes([n0, n1, n2, n3])) else {
             return Err(Refusal::Truncated);
         };
-        if (bytes.len() - HEADER_LEN) / CENTROID_LEN < clusters {
+        let (fields, _) = body.as_chunks::<FIELD_LEN>();
+        let (slots, _) = fields.as_chunks::<2>();
+        let Some(slots) = slots.get(..clusters) else {
             return Err(Refusal::Truncated);
-        }
-        let body = &bytes[HEADER_LEN..HEADER_LEN + clusters * CENTROID_LEN];
+        };
 
-        let Some(mut digest) = Self::new(u16::from_le_bytes([header[1], header[2]])) else {
+        let Some(mut digest) = Self::new(u16::from_le_bytes([c0, c1])) else {
             return Err(Refusal::Malformed);
         };
-        digest.count = f64::from_le_bytes(read8(&header[7..15]));
-        digest.minimum = f64::from_le_bytes(read8(&header[15..23]));
-        digest.maximum = f64::from_le_bytes(read8(&header[23..31]));
-        let (slots, _) = body.as_chunks::<CENTROID_LEN>();
+        let (fields, _) = scalars.as_chunks::<FIELD_LEN>();
+        let mut fields = fields.iter().copied().map(f64::from_le_bytes);
+        // Twenty-four bytes are exactly three fields: none of these is short.
+        let (Some(count), Some(minimum), Some(maximum)) =
+            (fields.next(), fields.next(), fields.next())
+        else {
+            return Err(Refusal::Truncated);
+        };
+        digest.count = count;
+        digest.minimum = minimum;
+        digest.maximum = maximum;
         digest.centroids = slots
             .iter()
-            .map(|slot| Centroid {
-                mean: f64::from_le_bytes(read8(&slot[..8])),
-                weight: f64::from_le_bytes(read8(&slot[8..])),
+            .map(|&[mean, weight]| Centroid {
+                mean: f64::from_le_bytes(mean),
+                weight: f64::from_le_bytes(weight),
             })
             .collect();
         if digest.is_coherent() {

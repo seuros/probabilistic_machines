@@ -20,7 +20,7 @@ default = ["alloc"]
 alloc = []
 
 [dependencies]
-sliderule-machines = ">=0.2"
+sliderule-machines = ">=0.3"
 
 [dev-dependencies]
 matryona-machines = { workspace = true, features = ["testing"] }

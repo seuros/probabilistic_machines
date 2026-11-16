@@ -6,6 +6,8 @@ use crate::{Refusal, TAG_CUCKOO, open_frame};
 const SLOTS: usize = 4;
 const EMPTY: u8 = 0;
 const MAX_KICKS: usize = 64;
+/// Tag and bucket-count bits.
+const HEADER_LEN: usize = 2;
 
 /// What [`CuckooFilter::remove`] did. Both answers are honoured, and both are
 /// about the item's fingerprint, which is all the filter stores.
@@ -63,7 +65,7 @@ impl<const B: usize> CuckooFilter<B> {
     pub const CAPACITY: usize = B * SLOTS;
 
     /// Length of the [`encode`](Self::encode) frame.
-    pub const ENCODED_LEN: usize = 2 + B * SLOTS;
+    pub const ENCODED_LEN: usize = HEADER_LEN + B * SLOTS;
 
     /// An empty filter.
     #[must_use]
@@ -114,7 +116,8 @@ impl<const B: usize> CuckooFilter<B> {
             return Ok(());
         }
 
-        let mut path = [0_usize; MAX_KICKS];
+        let mut path = [(0_usize, 0_usize); MAX_KICKS];
+        let mut kicked = 0;
         let mut index = alternate;
         let mut carried = fingerprint;
         let mut walk = mix64(hash);
@@ -122,16 +125,26 @@ impl<const B: usize> CuckooFilter<B> {
         for step in &mut path {
             walk = mix64(walk);
             let slot = usize::from(u64_low_u16(walk)) % SLOTS;
-            core::mem::swap(&mut carried, &mut self.buckets[index][slot]);
-            *step = index * SLOTS + slot;
+            let Some(cell) = self.cell_mut(index, slot) else {
+                debug_assert!(false, "a bucket is masked below B and a slot below SLOTS");
+                // Undone below with the kicks before it: refused, unchanged.
+                break;
+            };
+            core::mem::swap(&mut carried, cell);
+            *step = (index, slot);
+            kicked += 1;
             index = Self::alternate(index, carried);
             if self.place(index, carried) {
                 return Ok(());
             }
         }
 
-        for step in path.iter().rev() {
-            core::mem::swap(&mut carried, &mut self.buckets[step / SLOTS][step % SLOTS]);
+        // Every cell on the path was found on the way out, so each is found
+        // again on the way back.
+        for &(index, slot) in path.iter().take(kicked).rev() {
+            if let Some(cell) = self.cell_mut(index, slot) {
+                core::mem::swap(&mut carried, cell);
+            }
         }
         Err(Refusal::Full)
     }
@@ -148,8 +161,13 @@ impl<const B: usize> CuckooFilter<B> {
         let fingerprint = fingerprint(hash);
         let primary = Self::bucket(hash);
         let alternate = Self::alternate(primary, fingerprint);
-        self.buckets[primary].contains(&fingerprint)
-            || self.buckets[alternate].contains(&fingerprint)
+        // Both buckets are masked below `B`, so both lookups land.
+        let holds = |index: usize| {
+            self.buckets
+                .get(index)
+                .is_some_and(|bucket| bucket.contains(&fingerprint))
+        };
+        holds(primary) || holds(alternate)
     }
 
     /// Drops one copy of an item.
@@ -181,12 +199,11 @@ impl<const B: usize> CuckooFilter<B> {
     encoders!("filter");
 
     /// Fills a frame of exactly [`ENCODED_LEN`](Self::ENCODED_LEN) bytes.
-    fn write_frame(&self, frame: &mut [u8]) {
-        frame[0] = TAG_CUCKOO;
-        frame[1] = u32_low_u8(B.trailing_zeros());
+    fn write_frame(&self, header: &mut [u8; HEADER_LEN], body: &mut [u8]) {
+        *header = [TAG_CUCKOO, u32_low_u8(B.trailing_zeros())];
 
         let fingerprints = self.buckets.iter().flatten();
-        for (slot, value) in frame[2..].iter_mut().zip(fingerprints) {
+        for (slot, value) in body.iter_mut().zip(fingerprints) {
             *slot = *value;
         }
     }
@@ -215,14 +232,14 @@ impl<const B: usize> CuckooFilter<B> {
     ///
     /// The same as [`decode`](Self::decode).
     pub fn decode_into(&mut self, bytes: &[u8]) -> Result<(), Refusal> {
-        let frame = open_frame(bytes, Self::ENCODED_LEN, TAG_CUCKOO)?;
-        if frame[1] != u32_low_u8(B.trailing_zeros()) {
+        let (&[_, bits], body) = open_frame::<HEADER_LEN>(bytes, Self::ENCODED_LEN, TAG_CUCKOO)?;
+        if bits != u32_low_u8(B.trailing_zeros()) {
             return Err(Refusal::WrongShape);
         }
 
         self.items = 0;
         let fingerprints = self.buckets.iter_mut().flatten();
-        for (value, byte) in fingerprints.zip(&frame[2..]) {
+        for (value, byte) in fingerprints.zip(body) {
             *value = *byte;
             if *byte != EMPTY {
                 self.items += 1;
@@ -240,8 +257,18 @@ impl<const B: usize> CuckooFilter<B> {
         index ^ twist
     }
 
+    /// Slot `slot` of bucket `index`; `None` past `B` or `SLOTS`.
+    fn cell_mut(&mut self, index: usize, slot: usize) -> Option<&mut u8> {
+        self.buckets.get_mut(index)?.get_mut(slot)
+    }
+
+    /// Fills the first empty slot of bucket `index`. Every bucket index is
+    /// masked below `B`, so the bucket is always found.
     fn place(&mut self, index: usize, fingerprint: u8) -> bool {
-        for slot in &mut self.buckets[index] {
+        let Some(bucket) = self.buckets.get_mut(index) else {
+            return false;
+        };
+        for slot in bucket {
             if *slot == EMPTY {
                 *slot = fingerprint;
                 self.items += 1;
@@ -251,10 +278,17 @@ impl<const B: usize> CuckooFilter<B> {
         false
     }
 
+    /// Clears one copy of `fingerprint` from bucket `index`, found as in
+    /// [`place`](Self::place).
     fn clear(&mut self, index: usize, fingerprint: u8) -> bool {
-        for slot in &mut self.buckets[index] {
+        let Some(bucket) = self.buckets.get_mut(index) else {
+            return false;
+        };
+        for slot in bucket {
             if *slot == fingerprint {
                 *slot = EMPTY;
+                // `items` counts the non-empty slots and this one held a
+                // fingerprint (never `EMPTY`), so it is at least one.
                 self.items -= 1;
                 return true;
             }

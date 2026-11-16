@@ -136,9 +136,9 @@ dependencies = [
 
 [[package]]
 name = "matryona-machines"
-version = "0.4.0"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b8f0f5f3041e6832eb8c13bf58e6908bce06cf13ce9577adca59a6dce2640c4c"
+checksum = "e448feeedb05fc14a41811dbbe56b1189c2ba1e4a46ae3a16b7f43e68810cc5d"
 dependencies = [
  "magnus",
 ]
@@ -286,9 +286,9 @@ checksum = "0fda2ff0d084019ba4d7c6f371c95d8fd75ce3524c3cb8fb653a3023f6323e64"
 
 [[package]]
 name = "sliderule-machines"
-version = "0.2.0"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7506416745fc466463e8ac3752a074a379bb8e15f736e5dcade5d2ee57c092c1"
+checksum = "1948b9304f5981d079f774b7441cb6b1d5aa3da7af54854e25a256e9fd6a049b"
 
 [[package]]
 name = "syn"

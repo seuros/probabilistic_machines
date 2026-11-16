@@ -4,9 +4,10 @@ use std::cell::RefCell;
 
 use magnus::typed_data::Obj;
 use magnus::{Error, RModule, RString, Ruby, Value, function, method, prelude::*};
-use matryona_machines::ruby::{bytes, integer};
+use matryona_machines::ruby::integer;
 use probabilistic_machines::{CountMinSketch, Refusal};
 
+use crate::data::bytes;
 use crate::{Pinned, answer, decoded_or_refused, define_class, partner, sizes, unsupported};
 
 /// Row widths [`Sketch`] is monomorphised for.

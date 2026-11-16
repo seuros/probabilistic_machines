@@ -39,6 +39,17 @@ module ProbabilisticMachines
       assert_equal 0, digest.size
     end
 
+    # A rank outside the stream is a caller's bug, told apart from an empty
+    # digest's NaN: RangeError for q outside 0..=1, NaN included.
+    def test_a_quantile_outside_zero_to_one_raises
+      digest = TDigest.new(100).tap { |d| (1..100).each { d.add(it) } }
+      [-0.0, 0, 0.5, 1, 1.0].each { |q| refute_predicate digest.quantile(q), :nan? }
+      [-1e-12, 1.0 + Float::EPSILON, 2, -1, Float::NAN, Float::INFINITY, -Float::INFINITY].each do |q|
+        assert_equal 'q must be in 0..=1', assert_raises(RangeError) { digest.quantile(q) }.message
+      end
+      assert_equal 'q must be in 0..=1', assert_raises(RangeError) { TDigest.new(100).quantile(2) }.message
+    end
+
     def test_a_weighted_value_stands_for_that_many_observations
       digest = TDigest.new(200)
 
@@ -123,11 +134,12 @@ module ProbabilisticMachines
       digest = TDigest.new(100)
       to_f = Object.new.tap { |object| def object.to_f = 1.0 }
       [1r, to_f, Complex(1, 0), nil].each do |bad|
-        assert_equal 'value must be a Float or Integer', assert_raises(TypeError) { digest.add(bad) }.message
-        assert_equal 'value must be a Float or Integer', assert_raises(TypeError) { digest.add_weighted(bad, 1) }.message
-        assert_equal 'weight must be a Float or Integer', assert_raises(TypeError) { digest.add_weighted(1, bad) }.message
-        assert_equal 'q must be a Float or Integer', assert_raises(TypeError) { digest.quantile(bad) }.message
-        assert_equal 'value must be a Float or Integer', assert_raises(TypeError) { digest.cdf(bad) }.message
+        {
+          'value' => [-> { digest.add(bad) }, -> { digest.add_weighted(bad, 1) }, -> { digest.cdf(bad) }],
+          'weight' => [-> { digest.add_weighted(1, bad) }], 'q' => [-> { digest.quantile(bad) }]
+        }.each do |name, calls|
+          calls.each { assert_equal "#{name} must be a Float or Integer", assert_raises(TypeError, &it).message }
+        end
       end
       assert digest.empty?
       assert_equal :not_finite, digest.add(Float::NAN)

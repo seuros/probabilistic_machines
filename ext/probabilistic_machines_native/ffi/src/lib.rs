@@ -14,7 +14,7 @@ mod tdigest;
 mod topk;
 
 use magnus::{Error, RArray, RClass, RModule, Ruby, TypedData, Value, prelude::*, typed_data::Obj};
-use matryona_machines::ruby::{Class, Registry, Symbols, exact_typed_with, symbol};
+use matryona_machines::ruby::{Class, Registry, Symbols, class_name, exact_typed_with, symbol};
 use probabilistic_machines::Refusal;
 
 matryona_machines::symbols! {
@@ -51,7 +51,7 @@ pub(crate) fn partner<T: TypedData>(
 ) -> Result<Obj<T>, Error> {
     let class = held.get(ruby)?.get(ruby);
     exact_typed_with(ruby, other, class, || {
-        format!("other must be a {class}, not {}", other.class())
+        format!("other must be a {class}, not {}", class_name(other))
     })
 }
 

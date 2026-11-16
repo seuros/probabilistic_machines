@@ -1,8 +1,11 @@
 use super::Hitter;
-use super::{HEADER_LEN, HeavyHitters, OVERESTIMATE_AT, RECORD_LEN};
+use super::{FIELD_LEN, HEADER_LEN, HeavyHitters, RECORD_LEN};
 use crate::Refusal;
 use crate::hash::mix64;
 use matryona_machines::testing::refuses;
+
+/// Where a record's overestimate begins, after its key and count.
+const OVERESTIMATE_AT: usize = 2 * FIELD_LEN;
 
 #[test]
 fn a_key_above_one_over_k_is_always_tracked() {

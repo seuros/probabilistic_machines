@@ -4,10 +4,10 @@ use std::cell::RefCell;
 
 use magnus::typed_data::Obj;
 use magnus::{Error, RArray, RModule, RString, Ruby, Value, function, method, prelude::*};
-use matryona_machines::ruby::{bytes, integer, real};
+use matryona_machines::ruby::{integer, real};
 use probabilistic_machines::{MIN_COMPRESSION, TDigest};
 
-use crate::data::{centroid, centroid_class};
+use crate::data::{bytes, centroid, centroid_class};
 use crate::{Pinned, answer, decoded_or_refused, define_class, partner};
 
 /// The class, pinned at init.
@@ -64,9 +64,17 @@ impl Wrapper {
         Ok(answer(ruby, outcome, "added"))
     }
 
-    fn quantile(&self, q: Value) -> Result<f64, Error> {
+    /// `RangeError` for a `q` outside `0..=1` (NaN included), where the
+    /// core answers NaN: a caller's bug, not an empty digest.
+    fn quantile(ruby: &Ruby, this: &Self, q: Value) -> Result<f64, Error> {
         let q = real(q, "q")?;
-        Ok(self.0.borrow().quantile(q))
+        if !(0.0..=1.0).contains(&q) {
+            return Err(Error::new(
+                ruby.exception_range_error(),
+                "q must be in 0..=1",
+            ));
+        }
+        Ok(this.0.borrow().quantile(q))
     }
 
     fn cdf(&self, value: Value) -> Result<f64, Error> {

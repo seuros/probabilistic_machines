@@ -29,33 +29,25 @@ pub const fn hash64(bytes: &[u8]) -> u64 {
 #[must_use]
 pub const fn hash64_with_seed(bytes: &[u8], seed: u64) -> u64 {
     let mut accumulator = seed ^ PRIME;
+    // Counts at most `bytes.len()`, which fits a `u64`.
     let mut consumed: u64 = 0;
-    let mut cursor = 0;
+    let mut rest = bytes;
 
-    while cursor + 8 <= bytes.len() {
-        let lane = u64::from_le_bytes([
-            bytes[cursor],
-            bytes[cursor + 1],
-            bytes[cursor + 2],
-            bytes[cursor + 3],
-            bytes[cursor + 4],
-            bytes[cursor + 5],
-            bytes[cursor + 6],
-            bytes[cursor + 7],
-        ]);
-        accumulator = (accumulator ^ mix64(lane))
+    while let Some((lane, after)) = rest.split_first_chunk::<8>() {
+        accumulator = (accumulator ^ mix64(u64::from_le_bytes(*lane)))
             .rotate_left(27)
             .wrapping_mul(PRIME);
-        cursor += 8;
+        rest = after;
         consumed += 8;
     }
 
+    // Fewer than eight bytes are left, so `shift` stays below 64.
     let mut tail: u64 = 0;
     let mut shift = 0;
-    while cursor < bytes.len() {
-        tail |= (bytes[cursor] as u64) << shift;
+    while let [byte, after @ ..] = rest {
+        tail |= (*byte as u64) << shift;
         shift += 8;
-        cursor += 1;
+        rest = after;
         consumed += 1;
     }
 

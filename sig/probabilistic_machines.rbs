@@ -16,6 +16,12 @@ module ProbabilisticMachines
   # of another shape, or contents no sketch produces.
   type decode_refusal = :truncated | :wrong_structure | :wrong_shape | :malformed
 
+  # Private native checks behind `Hitter.new` and `Centroid.new`: the members
+  # of a valid value (a frozen UTF-8 copy of the key; the centroid as Floats),
+  # TypeError/RangeError where the core has no such value.
+  private def self.__hitter: (String key, Integer count, Integer overestimate) -> [String, Integer, Integer]
+  private def self.__centroid: (Float | Integer mean, Float | Integer weight) -> [Float, Float]
+
   # The core's `Hitter`. The true count lies in `count - overestimate` through
   # `count`. Raises RangeError unless `overestimate < count` (both in
   # `0...2**64`), TypeError for a non-String key or a non-Integer count.
@@ -127,7 +133,8 @@ module ProbabilisticMachines
     def add_weighted: (Float | Integer value, Float | Integer weight)
                     -> (:added | :not_finite | :invalid_weight | :overflow)
 
-    # Value at quantile `q`, `Float::NAN` when empty.
+    # Value at quantile `q`, `Float::NAN` when empty. RangeError for `q`
+    # outside 0..=1, NaN included.
     def quantile: (Float | Integer q) -> Float
 
     # Fraction of the stream at or below `value`, `Float::NAN` when empty.

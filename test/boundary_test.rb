@@ -74,7 +74,8 @@ module ProbabilisticMachines
     # nothing it holds.
     def test_a_merge_partner_is_exactly_the_sketch_class
       GC.verify_compaction_references(expand_heap: true, toward: :empty)
-      partners = { HyperLogLog.new(1024) => HyperLogLog.new(1024), CountMinSketch.new(1024, 4) => CountMinSketch.new(1024, 4),
+      partners = { HyperLogLog.new(1024) => HyperLogLog.new(1024),
+                   CountMinSketch.new(1024, 4) => CountMinSketch.new(1024, 4),
                    HeavyHitters.new(16) => HeavyHitters.new(16), TDigest.new(100) => TDigest.new(100) }
       partners.each do |sketch, partner|
         assert_equal :merged, sketch.merge(partner)
@@ -82,23 +83,29 @@ module ProbabilisticMachines
         assert_equal "other must be a #{sketch.class}, not ProbabilisticMachines::CuckooFilter", error.message
         error = assert_raises(TypeError) { sketch.merge(:bad) }
         assert_equal "other must be a #{sketch.class}, not Symbol", error.message
+        opened = CuckooFilter.new(1024).tap { |filter| def filter.opened = true }
+        error = assert_raises(TypeError) { sketch.merge(opened) }
+        assert_equal "other must be a #{sketch.class}, not ProbabilisticMachines::CuckooFilter", error.message
       end
     end
 
     # Frames and items are exactly a String, their bytes copied natively: a
-    # String subclass instance and an object answering to_str are TypeError,
+    # String subclass instance and an object answering to_str are TypeError
+    # naming the class received (the real class, never an opened singleton),
     # and a redefined #bytes, #to_s or #to_str on a String changes nothing.
     def test_frames_and_items_are_exactly_a_string
       to_str = Object.new.tap { |object| def object.to_str = 'a' }
-      bad = [Class.new(String).new('a'), to_str, :a, nil]
+      bad = { Class.new(String).new('a') => nil, to_str => 'Object', a: 'Symbol', nil => 'NilClass' }
       frames = { HyperLogLog => HyperLogLog.new(1024), CountMinSketch => CountMinSketch.new(1024, 4),
-                 CuckooFilter => CuckooFilter.new(1024), HeavyHitters => HeavyHitters.new(16), TDigest => TDigest.new(100) }
+                 CuckooFilter => CuckooFilter.new(1024), HeavyHitters => HeavyHitters.new(16),
+                 TDigest => TDigest.new(100) }
       frames.each do |klass, sketch|
-        bad.each do |value|
-          assert_equal 'bytes must be a String', assert_raises(TypeError) { klass.decode(value) }.message
+        bad.each do |value, received|
+          expected = "bytes must be a String, not #{received || value.class}"
+          assert_equal expected, assert_raises(TypeError) { klass.decode(value) }.message
           next unless sketch.respond_to?(:decode_into)
 
-          assert_equal 'bytes must be a String', assert_raises(TypeError) { sketch.decode_into(value) }.message
+          assert_equal expected, assert_raises(TypeError) { sketch.decode_into(value) }.message
         end
       end
       hll = HyperLogLog.new(1024)
@@ -106,8 +113,9 @@ module ProbabilisticMachines
       filter = CuckooFilter.new(1024)
       items = [-> { hll.add(it) }, -> { cms.add(it) }, -> { cms.add_count(it, 2) }, -> { cms.estimate(it) },
                -> { filter.insert(it) }, -> { filter.contains?(it) }, -> { filter.remove(it) }]
-      bad.each do |value|
-        items.each { |call| assert_equal 'item must be a String', assert_raises(TypeError) { call.call(value) }.message }
+      bad.each do |value, received|
+        expected = "item must be a String, not #{received || value.class}"
+        items.each { |call| assert_equal expected, assert_raises(TypeError) { call.call(value) }.message }
       end
       assert_equal [true, 0, true], [hll.empty?, cms.total, filter.empty?]
       liar = +'a'

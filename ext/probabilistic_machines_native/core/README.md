@@ -169,6 +169,8 @@ Accuracy is a function of the size you pick, and nothing here hides that:
 HyperLogLog's standard error is `1.04 / sqrt(M)`; count-min overshoots by more
 than `e * total / W` with probability at most `e^-D`; a t-digest cluster near
 quantile `q` holds at most `4 * n * q * (1 - q) / compression` of the stream.
+`TDigest::quantile` answers `f64::NAN` for an empty digest and for a `q`
+outside `0.0..=1.0`, NaN included.
 
 ## Contract
 
@@ -233,3 +235,7 @@ registers, against a documented error of `1.04 / sqrt(M)` of the estimate. The
 earlier private `f64` series was within a few parts in `10^10` and depended on
 the target's floating-point evaluation; this one does not. The harmonic-mean
 branch is sums, products and one division of `f64`s, each correctly rounded.
+Every `f64` answer here (estimates, quantiles, cdf) assumes binary64 evaluated
+one rounding per operation; x87 extended-precision evaluation (32-bit x86
+without SSE2) may differ in the last bit. Frames store `f64`s as their
+little-endian bits, so a frame decodes to the same state everywhere.

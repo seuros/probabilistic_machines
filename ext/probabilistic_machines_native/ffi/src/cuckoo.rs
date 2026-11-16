@@ -4,9 +4,10 @@ use std::cell::RefCell;
 
 use magnus::typed_data::Obj;
 use magnus::{Error, RModule, RString, Ruby, Value, function, method, prelude::*};
-use matryona_machines::ruby::{Symbols, bytes, integer};
+use matryona_machines::ruby::{Symbols, integer};
 use probabilistic_machines::{CuckooFilter, Refusal, Removing};
 
+use crate::data::bytes;
 use crate::{Pinned, answer, decoded_or_refused, define_class, sizes, unsupported};
 
 /// Bucket counts [`Filter`] is monomorphised for.

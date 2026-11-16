@@ -68,6 +68,25 @@ fn an_empty_digest_has_no_quantiles() {
 }
 
 #[test]
+fn a_quantile_outside_zero_to_one_is_nan() {
+    let digest = uniform(1_000, 100);
+    for q in [-0.0, 0.0, 0.5, 1.0] {
+        assert!(!digest.quantile(q).is_nan(), "q{q}");
+    }
+    for q in [
+        -1e-12,
+        1.0 + f64::EPSILON,
+        2.0,
+        -1.0,
+        f64::NAN,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+    ] {
+        assert!(digest.quantile(q).is_nan(), "q{q}");
+    }
+}
+
+#[test]
 fn a_single_point_is_every_quantile() {
     let mut digest = built(100);
     assert_eq!(digest.add(42.0), Ok(()));

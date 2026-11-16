@@ -10,15 +10,14 @@ const LN_BITS: u32 = sliderule_machines::MAX_FRACTION_BITS;
 /// Bits of hash a sketch splits into a register index and a leading-zero count.
 const HASH_BITS: u32 = 64;
 
-const POW2_NEG: [f64; 65] = {
-    let mut table = [1.0; 65];
-    let mut exponent = 1;
-    while exponent < 65 {
-        table[exponent] = table[exponent - 1] * 0.5;
-        exponent += 1;
-    }
-    table
-};
+/// Tag and precision.
+const HEADER_LEN: usize = 2;
+
+/// `2^-exponent`, built from its bits: exact for every exponent the sketches
+/// use (at most 64), the same value repeated halving of 1.0 gives.
+const fn pow2_neg(exponent: u32) -> f64 {
+    f64::from_bits(((1023 - exponent) as u64) << 52)
+}
 
 /// Counts distinct items in `M` bytes of state, however many items it sees.
 ///
@@ -63,7 +62,7 @@ impl<const M: usize> HyperLogLog<M> {
     const MAX_RANK: u8 = u32_low_u8(HASH_BITS - Self::PRECISION + 1);
 
     /// Length of the [`encode`](Self::encode) frame.
-    pub const ENCODED_LEN: usize = M + 2;
+    pub const ENCODED_LEN: usize = HEADER_LEN + M;
 
     /// An empty sketch: every register zero.
     #[must_use]
@@ -77,7 +76,7 @@ impl<const M: usize> HyperLogLog<M> {
     /// `sqrt(2)` when the precision is odd: no `std` square root is needed.
     #[must_use]
     pub const fn standard_error() -> f64 {
-        let halved = 1.04 * POW2_NEG[(Self::PRECISION / 2) as usize];
+        let halved = 1.04 * pow2_neg(Self::PRECISION / 2);
         if Self::PRECISION % 2 == 1 {
             halved * core::f64::consts::FRAC_1_SQRT_2
         } else {
@@ -93,10 +92,14 @@ impl<const M: usize> HyperLogLog<M> {
     /// Records an item the caller already hashed, for keys that never existed
     /// as bytes.
     pub fn add_hash(&mut self, hash: u64) {
+        // The top `PRECISION` bits of the hash: an index below `M`, so the
+        // lookup always lands.
         let index = usize::from(u64_low_u16(hash >> (HASH_BITS - Self::PRECISION)));
         let rank = rank(hash, Self::PRECISION);
-        if self.registers[index] < rank {
-            self.registers[index] = rank;
+        if let Some(register) = self.registers.get_mut(index)
+            && *register < rank
+        {
+            *register = rank;
         }
     }
 
@@ -120,18 +123,26 @@ impl<const M: usize> HyperLogLog<M> {
     /// products and one division of `f64`s, each correctly rounded by IEEE 754.
     #[must_use]
     pub fn estimate(&self) -> f64 {
+        // A register never holds more than `MAX_RANK` (at most 61), so every
+        // lookup lands; and `M <= 65536` registers keep each count far from
+        // overflow.
         let mut histogram = [0_u32; 65];
         for &register in &self.registers {
-            histogram[usize::from(register)] += 1;
+            if let Some(count) = histogram.get_mut(usize::from(register)) {
+                *count += 1;
+            }
         }
 
         let mut registers = 0.0;
         let mut harmonic = 0.0;
-        for (zeros, &count) in histogram.iter().enumerate() {
+        // `2^-zeros`, halved per bucket: exact, as every power is.
+        let mut weight = 1.0;
+        for &count in &histogram {
             let bucket = f64::from(count);
-            let weighted = bucket * POW2_NEG[zeros];
+            let weighted = bucket * weight;
             registers += bucket;
             harmonic += weighted;
+            weight *= 0.5;
         }
 
         let alpha = match Self::PRECISION {
@@ -163,10 +174,11 @@ impl<const M: usize> HyperLogLog<M> {
     encoders!("sketch");
 
     /// Fills a frame of exactly [`ENCODED_LEN`](Self::ENCODED_LEN) bytes.
-    fn write_frame(&self, frame: &mut [u8]) {
-        frame[0] = TAG_HYPERLOGLOG;
-        frame[1] = u32_low_u8(Self::PRECISION);
-        frame[2..].copy_from_slice(&self.registers);
+    fn write_frame(&self, header: &mut [u8; HEADER_LEN], body: &mut [u8]) {
+        *header = [TAG_HYPERLOGLOG, u32_low_u8(Self::PRECISION)];
+        for (byte, register) in body.iter_mut().zip(&self.registers) {
+            *byte = *register;
+        }
     }
 
     /// Reads a sketch written by [`encode`](Self::encode).
@@ -192,18 +204,20 @@ impl<const M: usize> HyperLogLog<M> {
     ///
     /// The same as [`decode`](Self::decode).
     pub fn decode_into(&mut self, bytes: &[u8]) -> Result<(), Refusal> {
-        let frame = open_frame(bytes, Self::ENCODED_LEN, TAG_HYPERLOGLOG)?;
-        if frame[1] != u32_low_u8(Self::PRECISION) {
+        let (&[_, precision], body) =
+            open_frame::<HEADER_LEN>(bytes, Self::ENCODED_LEN, TAG_HYPERLOGLOG)?;
+        if precision != u32_low_u8(Self::PRECISION) {
             return Err(Refusal::WrongShape);
         }
-        let mut index = 0;
-        while index < M {
-            if frame[2 + index] > Self::MAX_RANK {
-                return Err(Refusal::Malformed);
-            }
-            index += 1;
+        // `open_frame` cut exactly `ENCODED_LEN` bytes, so the body is `M`
+        // registers long and this never refuses.
+        let Some(registers) = body.first_chunk::<M>() else {
+            return Err(Refusal::Truncated);
+        };
+        if registers.iter().any(|&register| register > Self::MAX_RANK) {
+            return Err(Refusal::Malformed);
         }
-        self.registers.copy_from_slice(&frame[2..]);
+        self.registers = *registers;
         Ok(())
     }
 }
@@ -240,11 +254,11 @@ const fn rank(hash: u64, precision: u32) -> u8 {
 fn linear_count(precision: u32, untouched: u32) -> f64 {
     let registers = 1_u64 << precision;
     let ln = ln_ratio::<LN_BITS>(&[registers], &[u64::from(untouched)]);
-    let midpoint = i128::midpoint(ln.lo, ln.hi).max(0).cast_unsigned();
+    let midpoint = i128::midpoint(ln.lo(), ln.hi()).max(0).cast_unsigned();
     let [b0, b1, b2, b3, b4, b5, b6, b7, ..] = midpoint.to_le_bytes();
     let low = f64::from(u32::from_le_bytes([b0, b1, b2, b3]));
     let high = f64::from(u32::from_le_bytes([b4, b5, b6, b7]));
-    let scaled = (high * 4_294_967_296.0 + low) * POW2_NEG[LN_BITS as usize];
+    let scaled = (high * 4_294_967_296.0 + low) * pow2_neg(LN_BITS);
     scaled * f64::from(1_u32 << precision)
 }
 

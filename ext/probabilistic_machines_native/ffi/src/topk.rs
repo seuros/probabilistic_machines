@@ -5,10 +5,10 @@ use std::collections::{HashMap, HashSet};
 
 use magnus::typed_data::Obj;
 use magnus::{Error, RArray, RModule, RString, Ruby, Value, function, method, prelude::*};
-use matryona_machines::ruby::{bytes, integer};
+use matryona_machines::ruby::integer;
 use probabilistic_machines::{HeavyHitters, Hitter, Refusal, hash64};
 
-use crate::data::{hitter, hitter_class, utf8_key};
+use crate::data::{bytes, hitter, hitter_class, utf8_key};
 use crate::{Pinned, answer, decoded_or_refused, define_class, partner, sizes, unsupported};
 
 /// Counter counts [`Table`] is monomorphised for.

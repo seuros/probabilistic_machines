@@ -158,11 +158,14 @@ module ProbabilisticMachines
     # `add`, `add_count`, `count` and `Hitter.new` alike. A UTF-8 String with
     # valid bytes is text, and so are ASCII bytes in any ASCII-compatible
     # encoding; non-ASCII bytes tagged otherwise are never transcoded, even
-    # when they happen to be valid UTF-8.
+    # when they happen to be valid UTF-8, and a dummy encoding is never text.
     def test_a_key_that_is_not_utf_8_is_rejected
       table = HeavyHitters.new(16)
+      # ISO-2022-JP is a dummy encoding: its escape sequences are 7-bit
+      # bytes, so "ASCII only" would wave it through.
+      dummy = ['ab'.encode('ISO-2022-JP'), 'あ'.encode('ISO-2022-JP')]
       ["\xff\xfe".b, "caf\xC3\xA9".b, "caf\xE9".dup.force_encoding('ISO-8859-1'), 'ab'.encode('UTF-16LE'),
-       "\xff".dup.force_encoding('UTF-8')].each do |bad|
+       "\xff".dup.force_encoding('UTF-8'), *dummy].each do |bad|
         [-> { table.add(bad) }, -> { table.add_count(bad, 2) }, -> { table.count(bad) },
          -> { Hitter.new(bad, 2, 1) }].each do |call|
           assert_equal 'key must be valid UTF-8', assert_raises(RangeError, &call).message
@@ -187,7 +190,7 @@ module ProbabilisticMachines
           assert_match(/\Akey must be a String, not /, assert_raises(TypeError, &call).message)
         end
       end
-      { k: 'Symbol', 5 => 'Integer', nil => 'NilClass' }.each do |bad, received|
+      { k: 'Symbol', 5 => 'Integer', nil => 'NilClass', to_str => 'Object' }.each do |bad, received|
         [-> { table.add(bad) }, -> { table.add_count(bad, 2) }, -> { table.count(bad) },
          -> { Hitter.new(bad, 2, 1) }].each do |call|
           assert_equal "key must be a String, not #{received}", assert_raises(TypeError, &call).message

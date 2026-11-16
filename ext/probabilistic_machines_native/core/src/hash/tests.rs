@@ -33,6 +33,36 @@ fn hashes_stay_distinct_across_the_eight_byte_lane_boundary() {
     assert!(hashes.windows(2).all(|pair| pair[0] != pair[1]));
 }
 
+// Sketches persist hashed positions, so the hash is part of the frame format:
+// these values pin it across every lane and tail length.
+#[test]
+fn hash_values_are_stable_across_lane_and_tail_lengths() {
+    let input: [u8; 20] = core::array::from_fn(|i| {
+        u8::try_from(i)
+            .unwrap_or(0)
+            .wrapping_mul(37)
+            .wrapping_add(11)
+    });
+    let pinned = [
+        (0, 0xB57A_554F_8C37_2F91),
+        (1, 0x4D91_B84B_EEDF_184E),
+        (7, 0x92E9_5DA0_1F23_E65A),
+        (8, 0xA931_FE89_CAA4_E2B2),
+        (9, 0x2540_0BDD_0399_3C18),
+        (15, 0x0CB2_5DF2_2F0C_A8A9),
+        (16, 0x73AC_1E82_DDFF_BDE5),
+        (17, 0x70F0_97CC_33BB_2D76),
+        (20, 0xB449_278D_2007_F9A8),
+    ];
+    for (length, expected) in pinned {
+        assert_eq!(hash64(&input[..length]), expected, "length {length}");
+    }
+    assert_eq!(
+        hash64_with_seed(&input[..13], 0xDEAD_BEEF),
+        0x770A_5A00_D6E1_D05B
+    );
+}
+
 #[test]
 fn seeds_give_independent_families() {
     assert_ne!(hash64(b"key"), hash64_with_seed(b"key", 1));
