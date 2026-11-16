@@ -8,7 +8,7 @@ use matryona_machines::ruby::{integer, real};
 use probabilistic_machines::{MIN_COMPRESSION, TDigest};
 
 use crate::data::{bytes, centroid, centroid_class};
-use crate::{Pinned, answer, decoded_or_refused, define_class, partner};
+use crate::{Pinned, answer, decoded_or_refused, define_class, partner, pin};
 
 /// The class, pinned at init.
 static CLASS: Pinned = Pinned::new("probabilistic_machines");
@@ -144,7 +144,7 @@ impl Wrapper {
 }
 
 pub fn define(ruby: &Ruby, module: RModule) -> Result<(), Error> {
-    let class = define_class(ruby, module, "TDigest", &CLASS)?;
+    let class = define_class(ruby, module, "TDigest")?;
     class.const_set("MIN_COMPRESSION", MIN_COMPRESSION)?;
     class.define_singleton_method("new", function!(Wrapper::new, 1))?;
     class.define_singleton_method("decode", function!(Wrapper::decode, 1))?;
@@ -163,5 +163,5 @@ pub fn define(ruby: &Ruby, module: RModule) -> Result<(), Error> {
     class.define_method("merge", method!(Wrapper::merge, 1))?;
     class.define_method("encoded", method!(Wrapper::encoded, 0))?;
     class.define_method("inspect", method!(Wrapper::inspect, 0))?;
-    Ok(())
+    pin::<Wrapper>(ruby, class, &CLASS)
 }

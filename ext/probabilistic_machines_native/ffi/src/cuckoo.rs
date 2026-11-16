@@ -8,7 +8,7 @@ use matryona_machines::ruby::{Symbols, integer};
 use probabilistic_machines::{CuckooFilter, Refusal, Removing};
 
 use crate::data::bytes;
-use crate::{Pinned, answer, decoded_or_refused, define_class, sizes, unsupported};
+use crate::{Pinned, answer, decoded_or_refused, define_class, pin, sizes, unsupported};
 
 /// Bucket counts [`Filter`] is monomorphised for.
 const BUCKETS: [usize; 4] = [1024, 4096, 16384, 65536];
@@ -186,7 +186,7 @@ impl Wrapper {
 }
 
 pub fn define(ruby: &Ruby, module: RModule) -> Result<(), Error> {
-    let class = define_class(ruby, module, "CuckooFilter", &CLASS)?;
+    let class = define_class(ruby, module, "CuckooFilter")?;
     class.const_set("BUCKETS", sizes(ruby, &BUCKETS))?;
     class.define_singleton_method("new", function!(Wrapper::new, 1))?;
     class.define_singleton_method("decode", function!(Wrapper::decode, 1))?;
@@ -203,5 +203,5 @@ pub fn define(ruby: &Ruby, module: RModule) -> Result<(), Error> {
     class.define_method("empty?", method!(Wrapper::is_empty, 0))?;
     class.define_method("encoded", method!(Wrapper::encoded, 0))?;
     class.define_method("inspect", method!(Wrapper::inspect, 0))?;
-    Ok(())
+    pin::<Wrapper>(ruby, class, &CLASS)
 }

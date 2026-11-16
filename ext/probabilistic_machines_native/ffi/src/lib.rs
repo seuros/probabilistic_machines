@@ -89,16 +89,17 @@ pub(crate) fn sizes(ruby: &Ruby, supported: &[usize]) -> RArray {
 }
 
 /// Defines `name` under `module` with no allocator of its own, so
-/// `Class#allocate` cannot hand out an object the core never built, and pins
-/// it into `held` (no lookup back by name).
-pub(crate) fn define_class(
-    ruby: &Ruby,
-    module: RModule,
-    name: &str,
-    held: &Pinned,
-) -> Result<RClass, Error> {
+/// `Class#allocate` cannot hand out an object the core never built.
+pub(crate) fn define_class(ruby: &Ruby, module: RModule, name: &str) -> Result<RClass, Error> {
     let class = module.define_class(name, ruby.class_object())?;
     class.undef_default_alloc_func();
-    held.set(ruby, Class::pin(ruby, class))?;
     Ok(class)
+}
+
+/// Pins `class` into `held` (no lookup back by name) and fixes magnus's class
+/// for the wrapped `T` to it: building a `T` never runs `Object.const_get`
+/// later. Called from init once the class and its methods are defined.
+pub(crate) fn pin<T: TypedData>(ruby: &Ruby, class: RClass, held: &Pinned) -> Result<(), Error> {
+    held.set(ruby, Class::pin_wrapped::<T>(ruby, class)?)
+        .map(drop)
 }

@@ -8,7 +8,7 @@ use matryona_machines::ruby::integer;
 use probabilistic_machines::{HyperLogLog, Refusal};
 
 use crate::data::bytes;
-use crate::{Pinned, answer, decoded_or_refused, define_class, partner, sizes, unsupported};
+use crate::{Pinned, answer, decoded_or_refused, define_class, partner, pin, sizes, unsupported};
 
 /// Register counts [`Sketch`] is monomorphised for.
 const REGISTERS: [usize; 4] = [1024, 4096, 16384, 65536];
@@ -180,7 +180,7 @@ impl Wrapper {
 }
 
 pub fn define(ruby: &Ruby, module: RModule) -> Result<(), Error> {
-    let class = define_class(ruby, module, "HyperLogLog", &CLASS)?;
+    let class = define_class(ruby, module, "HyperLogLog")?;
     class.const_set("REGISTERS", sizes(ruby, &REGISTERS))?;
     class.define_singleton_method("new", function!(Wrapper::new, 1))?;
     class.define_singleton_method("decode", function!(Wrapper::decode, 1))?;
@@ -194,5 +194,5 @@ pub fn define(ruby: &Ruby, module: RModule) -> Result<(), Error> {
     class.define_method("merge", method!(Wrapper::merge, 1))?;
     class.define_method("encoded", method!(Wrapper::encoded, 0))?;
     class.define_method("inspect", method!(Wrapper::inspect, 0))?;
-    Ok(())
+    pin::<Wrapper>(ruby, class, &CLASS)
 }
