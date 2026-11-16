@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.1](https://github.com/seuros/probabilistic_machines/compare/probabilistic_machines/v0.6.0...probabilistic_machines/v0.6.1) (2026-11-16)
+
+
+### Bug Fixes
+
+* fix wrapped classes at load so building a value runs no Ruby ([48b4a0b](https://github.com/seuros/probabilistic_machines/commit/48b4a0b4328216cb6700520f2c98e0c22da6f4aa))
+
 ## [0.6.0](https://github.com/seuros/probabilistic_machines/compare/probabilistic_machines/v0.5.0...probabilistic_machines/v0.6.0) (2026-11-16)
 
 
